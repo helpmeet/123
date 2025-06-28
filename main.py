@@ -7,7 +7,7 @@ API_HASH = os.environ['API_HASH']
 BOT_TOKEN = os.environ['BOT_TOKEN']
 CHANNEL_ID = os.environ['CHANNEL_ID']
 
-client = TelegramClient('3commas_session', API_ID, API_HASH)
+client = TelegramClient('./3commas_session', API_ID, API_HASH)
 
 @client.on(events.NewMessage(from_users='3commas_notifications_bot'))
 async def handler(event):
