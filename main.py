@@ -3,7 +3,11 @@ import time
 import hmac
 import hashlib
 import requests
+import threading
+import http.server
+import socketserver
 
+# === Настройки ===
 THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
 THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -13,6 +17,15 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 API_URL = "https://api.3commas.io/public/api/ver1/deals"
 known_deals = {}
 
+# === Фейковый сервер для Render (Web Service) ===
+def fake_server():
+    PORT = int(os.environ.get("PORT", 8000))
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print("Fake HTTP server running on port", PORT)
+        httpd.serve_forever()
+
+# === Подпись запроса ===
 def sign_request(params):
     payload = '&'.join([f'{k}={v}' for k, v in sorted(params.items())])
     signature = hmac.new(
@@ -22,6 +35,7 @@ def sign_request(params):
     ).hexdigest()
     return signature
 
+# === Получение сделок ===
 def get_deals():
     params = {"limit": 20}
     headers = {
@@ -32,6 +46,7 @@ def get_deals():
     response.raise_for_status()
     return response.json()
 
+# === Отправка в Telegram ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {
@@ -39,8 +54,12 @@ def send_telegram_message(text):
         "text": text,
         "parse_mode": "HTML"
     }
-    requests.post(url, data=data)
+    try:
+        requests.post(url, data=data)
+    except Exception as e:
+        print(f"Ошибка при отправке в Telegram: {e}")
 
+# === Основная логика ===
 def monitor_deals():
     while True:
         try:
@@ -50,12 +69,17 @@ def monitor_deals():
                 dca_count = deal["completed_safety_orders_count"]
                 status = deal["status"]
 
+                # Денежные значения
+                bought_avg = float(deal["bought_average"] or 0)
+                bought_vol = float(deal["bought_volume"] or 0) * 10
+                profit_pct = float(deal.get("actual_profit_percentage", 0)) * 10
+
                 if deal_id not in known_deals:
+                    # Новая сделка
                     msg = (
-                        f"📈 <b>Новая сделка:</b> {deal['pair']}\n"
-                        f"🟢 Статус: {status}\n"
-                        f"💵 Цена входа: {deal['bought_average'] or '—'}\n"
-                        f"🧱 DCA: 0"
+                        f"📈 <b>Новая сделка</b> по паре <b>{deal['pair']}</b>\n"
+                        f"🟢 Статус: <code>{status}</code>\n"
+                        f"💵 Цена входа: {bought_avg:.2f}"
                     )
                     send_telegram_message(msg)
                     known_deals[deal_id] = {"dca": dca_count, "status": status}
@@ -65,24 +89,26 @@ def monitor_deals():
 
                     if dca_count > prev["dca"]:
                         msg = (
-                            f"➕ <b>DCA докупка</b> #{dca_count} в сделке {deal['pair']}\n"
-                            f"Общий объем: {deal['bought_volume']} {deal['base_order_volume_type']}"
+                            f"➕ <b>Докупил</b> #{dca_count} в сделке <b>{deal['pair']}</b>\n"
+                            f"📊 Объём: {bought_vol:.2f} {deal['base_order_volume_type']}"
                         )
                         send_telegram_message(msg)
                         known_deals[deal_id]["dca"] = dca_count
 
                     if status == "completed" and prev["status"] != "completed":
                         msg = (
-                            f"✅ <b>Сделка закрыта</b>: {deal['pair']}\n"
-                            f"📈 Профит: {deal['actual_profit_percentage']}%\n"
-                            f"🧱 DCA шагов: {dca_count}"
+                            f"✅ <b>Сделка завершена</b>: <b>{deal['pair']}</b>\n"
+                            f"📈 Прибыль: {profit_pct:.2f}%"
                         )
                         send_telegram_message(msg)
-                        known_deals[deal_id]["status"] = "completed"
+                        known_deals[deal_id]["status"] = status
 
         except Exception as e:
             print(f"Ошибка: {e}")
         time.sleep(POLL_INTERVAL)
 
+# === Запуск ===
 if name == "__main__":
+    threading.Thread(target=fake_server, daemon=True).start()
+    print("📡 Мониторинг сделок 3Commas запущен...")
     monitor_deals()
