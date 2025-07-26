@@ -123,7 +123,7 @@ def monitor_deals():
         time.sleep(POLL_INTERVAL)
 
 # === Запуск приложения ===
-if name == "__main__":
+if __name__ == "__main__":
     threading.Thread(target=fake_server, daemon=True).start()
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Мониторинг сделок 3Commas запущен...")
     monitor_deals()
