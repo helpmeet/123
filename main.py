@@ -97,7 +97,8 @@ def monitor_deals():
                         f"🟢 Статус: <code>{status}</code>\n"
                         f"💵 Цена входа: {bought_avg:.2f}"
                     )
-                    send_telegram_message(msg) known_deals[deal_id] = {"dca": dca_count, "status": status}
+                    send_telegram_message(msg) 
+                    known_deals[deal_id] = {"dca": dca_count, "status": status}
 
                 else:
                     prev = known_deals[deal_id]
