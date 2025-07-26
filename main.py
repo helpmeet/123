@@ -6,29 +6,37 @@ import requests
 import threading
 import http.server
 import socketserver
+from datetime import datetime
 
-# === Настройки окружения ===
+# === Настройки ===
 THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
 THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
-API_PATH = "/public/api/ver1/deals"
-API_URL = "https://api.3commas.io" + API_PATH
+
+API_URL = "https://api.3commas.io/public/api/ver1/deals"
 known_deals = {}
 
-# === Фейковый HTTP-сервер (для Render) ===
+# === Фейковый сервер для Render (чтобы он не засыпал) ===
 def fake_server():
     PORT = int(os.environ.get("PORT", 8000))
     Handler = http.server.SimpleHTTPRequestHandler
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌐 Фейковый сервер запущен на порту {PORT}")
+        print("🌐 Fake HTTP server running on port", PORT)
         httpd.serve_forever()
 
+# === Внешний IP (для отладки) ===
+def log_external_ip():
+    try:
+        ip = requests.get("https://api.ipify.org").text
+        print(f"[DEBUG] Внешний IP Render: {ip}")
+    except Exception as e:
+        print(f"[DEBUG] Не удалось получить внешний IP: {e}")
+
 # === Подпись запроса ===
-def sign_request(path, params):
-    query_string = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
-    payload = f"{path}?{query_string}"
+def sign_request(params):
+    payload = '&'.join([f'{k}={v}' for k, v in sorted(params.items())])
     signature = hmac.new(
         bytes(THREECOMMAS_API_SECRET, 'utf-8'),
         msg=bytes(payload, 'utf-8'),
@@ -36,32 +44,18 @@ def sign_request(path, params):
     ).hexdigest()
     return signature
 
-# === Получение IP-адреса для настройки в 3Commas ===
-def log_public_ip():
-    try:
-        ip = requests.get("https://api.ipify.org").text
-        print(f"[DEBUG] Внешний IP-адрес сервиса (добавь в 3Commas): {ip}")
-    except Exception as e:
-        print(f"[DEBUG] Не удалось получить внешний IP: {e}")
-
 # === Получение сделок ===
 def get_deals():
     params = {"limit": 20}
-    signature = sign_request(API_PATH, params)
     headers = {
         "APIKEY": THREECOMMAS_API_KEY,
-        "Signature": signature
+        "Signature": sign_request(params)
     }
-
-    try:
-        response = requests.get(API_URL, headers=headers, params=params)
-        print(f"[DEBUG] HTTP status: {response.status_code}")
-        print(f"[DEBUG] Response text: {response.text[:300]}")  # первые 300 символов
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка при получении сделок: {e}")
-        return []
+    response = requests.get(API_URL, headers=headers, params=params)
+    print(f"[DEBUG] HTTP status: {response.status_code}")
+    print(f"[DEBUG] Response text: {response.text[:300]}")
+    response.raise_for_status()
+    return response.json()
 
 # === Отправка в Telegram ===
 def send_telegram_message(text):
@@ -73,27 +67,31 @@ def send_telegram_message(text):
     }
     try:
         resp = requests.post(url, data=data)
-        if resp.ok:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Сообщение отправлено в Telegram")
-        else:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка Telegram: {resp.status_code} {resp.text}")
+        print(f"[DEBUG] Telegram send status: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"[DEBUG] Telegram error: {resp.text}")
     except Exception as e:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Telegram ошибка: {e}")
+        print(f"Ошибка при отправке в Telegram: {e}")
 
-# === Основная логика мониторинга ===
+# === Основная логика ===
 def monitor_deals():
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ▶️ Старт мониторинга сделок")
     while True:
         try:
             deals = get_deals()
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Получено сделок: {len(deals)}")
+
             for deal in deals:
                 deal_id = deal["id"]
+                print(f"[DEBUG] Обрабатывается сделка ID: {deal_id}, статус: {deal['status']}")
+                
                 dca_count = deal["completed_safety_orders_count"]
                 status = deal["status"]
-
                 bought_avg = float(deal.get("bought_average") or 0)
                 bought_vol = float(deal.get("bought_volume") or 0) * 10
-                profit_pct = float(deal.get("actual_profit_percentage") or 0) * 10
+                profit_pct = float(deal.get("actual_profit_percentage", 0)) * 10
+
+                # Тестовая отправка
+                send_telegram_message(f"‼️ Проверка. Сделка: {deal['pair']} ID: {deal_id}")
 
                 if deal_id not in known_deals:
                     msg = (
@@ -103,15 +101,17 @@ def monitor_deals():
                     )
                     send_telegram_message(msg)
                     known_deals[deal_id] = {"dca": dca_count, "status": status}
+
                 else:
                     prev = known_deals[deal_id]
 
                     if dca_count > prev["dca"]:
-                        msg = (f"➕ <b>Докупил</b> #{dca_count} в сделке <b>{deal['pair']}</b>\n"
-                            f"📊 Объём: {bought_vol:.2f} {deal.get('base_order_volume_type', '')}"
+                        msg = (
+                            f"➕ <b>Докупил</b> #{dca_count} в сделке <b>{deal['pair']}</b>\n"
+                            f"📊 Объём: {bought_vol:.2f} {deal['base_order_volume_type']}"
                         )
                         send_telegram_message(msg)
-                        known_deals[deal_id]["dca"] = dca_count
+known_deals[deal_id]["dca"] = dca_count
 
                     if status == "completed" and prev["status"] != "completed":
                         msg = (
@@ -120,13 +120,14 @@ def monitor_deals():
                         )
                         send_telegram_message(msg)
                         known_deals[deal_id]["status"] = status
+
         except Exception as e:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка в основном цикле: {e}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка при получении сделок: {e}")
         time.sleep(POLL_INTERVAL)
 
 # === Запуск ===
 if __name__ == "__main__":
-    log_public_ip()
     threading.Thread(target=fake_server, daemon=True).start()
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Бот запущен и готов к работе")
+    log_external_ip()
+    print("📡 Мониторинг сделок 3Commas запущен...")
     monitor_deals()
