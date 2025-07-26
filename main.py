@@ -111,7 +111,7 @@ def monitor_deals():
                             f"📊 Объём: {bought_vol:.2f} {deal['base_order_volume_type']}"
                         )
                         send_telegram_message(msg)
-known_deals[deal_id]["dca"] = dca_count
+                        known_deals[deal_id]["dca"] = dca_count
 
                     if status == "completed" and prev["status"] != "completed":
                         msg = (
