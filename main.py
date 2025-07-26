@@ -40,17 +40,26 @@ def sign_request(path, params):
 
 # === Получение сделок ===
 def get_deals():
-    params = {
-        "limit": 20,
-    }
+    params = {"limit": 20}
     signature = sign_request(API_PATH, params)
     headers = {
         "APIKEY": THREECOMMAS_API_KEY,
         "Signature": signature
     }
-    response = requests.get(API_URL, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
+
+    try:
+        response = requests.get(API_URL, headers=headers, params=params)
+
+        # ⬇️ Добавим отладочную информацию
+        print(f"[DEBUG] HTTP status: {response.status_code}")
+        print(f"[DEBUG] Response text: {response.text[:300]}")  # первые 300 символов
+
+        response.raise_for_status()
+        return response.json()
+
+    except Exception as e:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Ошибка при получении сделок: {e}")
+        return []
 
 # === Отправка сообщений в Telegram ===
 def send_telegram_message(text):
@@ -116,7 +125,7 @@ def monitor_deals():
         time.sleep(POLL_INTERVAL)
 
 # === Запуск ===
-if __name__ == "__main__":
+if name == "__main__":
     threading.Thread(target=fake_server, daemon=True).start()
     print("📡 Мониторинг сделок 3Commas запущен...")
     monitor_deals()
