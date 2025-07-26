@@ -116,7 +116,7 @@ def monitor_deals():
         time.sleep(POLL_INTERVAL)
 
 # === Запуск ===
-if name == "__main__":
+if __name__ == "__main__":
     threading.Thread(target=fake_server, daemon=True).start()
     print("📡 Мониторинг сделок 3Commas запущен...")
     monitor_deals()
