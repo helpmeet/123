@@ -6,7 +6,7 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
-# === Загрузка переменных окружения ===
+# === Загрузка переменных окружения из .env ===
 load_dotenv()
 
 API_KEY = os.getenv("THREECOMMAS_API_KEY")
@@ -16,7 +16,7 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
 if not all([API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID]):
-    raise ValueError("❌ Отсутствуют необходимые переменные окружения.")
+    raise ValueError("❌ Отсутствуют необходимые переменные окружения (API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID)")
 
 API_BASE = "https://api.3commas.io/public/api"
 known_deals = {}
@@ -125,8 +125,7 @@ def monitor_deals():
                 pair = deal["pair"]
                 status = deal["status"]
                 dca = int(deal.get("completed_safety_orders_count") or 0)
-                quote = pair.
-split("_")[-1]
+                base, quote = pair.split("_")
 
                 prev = known_deals.get(deal_id, {"dca": 0, "status": ""})
 
@@ -135,8 +134,8 @@ split("_")[-1]
                     price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
-                            f"🛒 Покупаю по цене 1 {quote} = {price:.6f} USDT\n"
-                            f"📊 Объем сделки: {qty:.6f} {quote}"
+                            f"🛒 Покупаю {base} по цене 1 {base} = {price:.6f} {quote}\n"
+                            f"📊 Объем сделки: {qty:.6f} {base}"
                         )
                         send_telegram_message(msg)
 
@@ -145,8 +144,8 @@ split("_")[-1]
                     price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
-                            f"🛒 Докупаю по цене 1 {quote} = {price:.6f} USDT\n"
-                            f"📊 Объем докупки: {qty:.6f} {quote}"
+                            f"🛒 Докупаю {base} по цене 1 {base} = {price:.6f} {quote}\n"
+                            f"📊 Объем докупки: {qty:.6f} {base}"
                         )
                         send_telegram_message(msg)
 
