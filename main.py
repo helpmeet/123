@@ -8,7 +8,7 @@ import http.server
 import socketserver
 from datetime import datetime
 
-# === Настройки ===
+# === 🔐 Настройки через переменные окружения ===
 THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
 THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -18,7 +18,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 API_URL = "https://api.3commas.io/public/api/ver1/deals"
 known_deals = {}
 
-# === Фейковый сервер для Render (чтобы он не засыпал) ===
+# === 🌐 Фейковый сервер для Render (не засыпал) ===
 def fake_server():
 PORT = int(os.environ.get("PORT", 8000))
 Handler = http.server.SimpleHTTPRequestHandler
@@ -26,7 +26,7 @@ with socketserver.TCPServer(("", PORT), Handler) as httpd:
 print("🌐 Fake HTTP server running on port", PORT)
 httpd.serve_forever()
 
-# === Внешний IP (для отладки) ===
+# === 🧠 Внешний IP (для отладки) ===
 def log_external_ip():
 try:
 ip = requests.get("https://api.ipify.org").text
@@ -34,7 +34,7 @@ print(f"[DEBUG] Внешний IP Render: {ip}")
 except Exception as e:
 print(f"[DEBUG] Не удалось получить внешний IP: {e}")
 
-# === Подпись запроса ===
+# === 🔐 Подпись запроса к 3Commas ===
 def sign_request(params):
 payload = '&'.join([f'{k}={v}' for k, v in sorted(params.items())])
 signature = hmac.new(
@@ -44,7 +44,7 @@ digestmod=hashlib.sha256
 ).hexdigest()
 return signature
 
-# === Получение сделок ===
+# === 📊 Получение активных сделок ===
 def get_deals():
 params = {"limit": 20}
 headers = {
@@ -57,7 +57,7 @@ print(f"[DEBUG] Response text: {response.text[:300]}")
 response.raise_for_status()
 return response.json()
 
-# === Отправка в Telegram ===
+# === 📤 Отправка уведомлений в Telegram ===
 def send_telegram_message(text):
 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 data = {
@@ -73,7 +73,7 @@ print(f"[DEBUG] Telegram error: {resp.text}")
 except Exception as e:
 print(f"Ошибка при отправке в Telegram: {e}")
 
-# === Основная логика ===
+# === 🔁 Основная логика мониторинга ===
 def monitor_deals():
 while True:
 try:
@@ -110,7 +110,8 @@ msg = (
 f"➕ <b>Докупил</b> #{dca_count} в сделке <b>{deal['pair']}</b>\n"
 f"📊 Объём: {bought_vol:.2f} {deal['base_order_volume_type']}"
 )
-send_telegram_message(msg) known_deals[deal_id]["dca"] = dca_count
+send_telegram_message(msg)
+known_deals[deal_id]["dca"] = dca_count
 
 if status == "completed" and prev["status"] != "completed":
 msg = (
@@ -124,7 +125,7 @@ except Exception as e:
 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка при получении сделок: {e}")
 time.sleep(POLL_INTERVAL)
 
-# === Запуск ===
+# === 🚀 Запуск ===
 if __name__ == "__main__":
 threading.Thread(target=fake_server, daemon=True).start()
 log_external_ip()
