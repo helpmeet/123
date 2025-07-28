@@ -26,7 +26,7 @@ API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
-API_BASE = "https://api.3commas.io/public/api"
+API_BASE = "https://api.3commas.io"
 
 known_deals = {}
 
