@@ -1,47 +1,35 @@
 import os
 import time
+import threading
 import hmac
 import hashlib
 import requests
 from datetime import datetime
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask, jsonify
 
-# === Минимальный HTTP-сервер для Render ===
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def run_server():
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    server.serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
-
-
-# === Настройки ===
+# --- Настройки из окружения ---
 API_KEY = os.getenv("THREECOMMAS_API_KEY")
 API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
+PORT = int(os.getenv("PORT", "8000"))
 
 API_BASE = "https://api.3commas.io/public/api"
 known_deals = {}
 
-def log(text):
-    print(f"[LOG] {text}")
+app = Flask(__name__)
 
-# === Подпись запроса ===
+def log(msg):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {msg}", flush=True)
+
 def sign(path, params):
-    query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+    # Формируем подпись для 3Commas API
+    query = '&'.join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
     payload = f"{path}?{query}" if query else path
     return hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-# === Отправка GET-запроса с подписью ===
 def get(path, params=None):
     params = params or {}
     headers = {
@@ -49,11 +37,10 @@ def get(path, params=None):
         "Signature": sign(path, params)
     }
     url = API_BASE + path
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
+    resp = requests.get(url, headers=headers, params=params)
+    resp.raise_for_status()
+    return resp.json()
 
-# === Отправка сообщения в Telegram ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
@@ -61,11 +48,13 @@ def send_telegram_message(text):
         "text": text,
         "parse_mode": "HTML"
     }
-    response = requests.post(url, data=payload)
-    if not response.ok:
-        log(f"[ERROR] Telegram: {response.text}")
+    try:
+        resp = requests.post(url, data=payload)
+        if not resp.ok:
+            log(f"[ERROR] Telegram message failed: {resp.text}")
+    except Exception as e:
+        log(f"[ERROR] Exception sending Telegram message: {e}")
 
-# === Получение последнего ордера сделки ===
 def get_last_order_price_and_qty(deal_id):
     try:
         path = f"/ver1/deals/{deal_id}/market_orders"
@@ -77,43 +66,48 @@ def get_last_order_price_and_qty(deal_id):
         qty = float(last.get("quantity") or 0)
         return price, qty
     except Exception as e:
-        log(f"[ERROR] Ошибка при получении ордеров сделки {deal_id}: {e}")
+        log(f"[ERROR] Error fetching market orders for deal {deal_id}: {e}")
         return None, None
 
-# === Статистика по сделкам и аккаунту ===
 def get_bot_stats():
-    deals = get("/ver1/deals", {"scope": "finished", "limit": 1000})
-    accounts = get("/ver1/accounts")
+    try:
+        deals = get("/ver1/deals", {"scope": "finished", "limit": 1000})
+        accounts = get("/ver1/accounts")
 
-    total_deals = len(deals)
-    total_profit = sum(float(d.get("actual_usd_profit") or 0) for d in deals)
+        total_deals = len(deals)
+        total_profit = sum(float(d.get("actual_usd_profit") or 0) for d in deals)
 
-    if deals:
-        first_closed = min(datetime.fromisoformat(d["closed_at"].replace("Z", "")) for d in deals if d.get("closed_at"))
-        days_working = (datetime.utcnow() - first_closed).days or 1
-    else:
-        days_working = 0
+        if deals:
+            first_closed = min(
+                datetime.fromisoformat(d["closed_at"].replace("Z", "")) 
+                for d in deals if d.get("closed_at")
+            )
+            days_working = max(1, (datetime.utcnow() - first_closed).days)
+        else:
+            days_working = 0
 
-    usdt_account = next((a for a in accounts if a["currency_code"] == "USDT"), accounts[0])
-    initial = float(usdt_account.get("initial_total") or 0)
-    balance = float(usdt_account.get("available_funds") or 0)
+        usdt_account = next((a for a in accounts if a["currency_code"] == "USDT"), accounts[0])
+        initial = float(usdt_account.get("initial_total") or 0)
+        balance = float(usdt_account.get("available_funds") or 0)
 
-    monthly_pct = (total_profit / initial) * (30 / max(1, days_working)) * 100 if initial > 0 else 0
-    yearly_pct = monthly_pct * 12
+        monthly_pct = (total_profit / initial) * (30 / days_working) * 100 if initial > 0 else 0
+        yearly_pct = monthly_pct * 12
 
-    return {
-        "total_deals": total_deals,
-        "total_profit": total_profit,
-        "days_working": days_working,
-        "initial": initial,
-        "balance": balance,
-        "monthly_pct": monthly_pct,
-        "yearly_pct": yearly_pct
-    }
+        return {
+            "total_deals": total_deals,
+            "total_profit": total_profit,
+            "days_working": days_working,
+            "initial": initial,
+            "balance": balance,
+            "monthly_pct": monthly_pct,
+            "yearly_pct": yearly_pct
+        }
+    except Exception as e:
+        log(f"[ERROR] Error fetching bot stats: {e}")
+        return {}
 
-# === Основной цикл мониторинга ===
 def monitor_deals():
-    log("▶️ Мониторинг сделок запущен...")
+    log("▶️ Starting deals monitor...")
     while True:
         try:
             deals = get("/ver1/deals", {"scope": "active", "limit": 100})
@@ -125,9 +119,10 @@ def monitor_deals():
                 quote = pair.split("_")[-1]
 
                 prev = known_deals.get(deal_id, {"dca": 0, "status": ""})
-# Новая сделка
+
+                # Новая сделка
                 if deal_id not in known_deals:
-                    price, qty = get_last_order_price_and_qty(deal_id)
+                   price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
                             f"🛒 Покупаю по цене 1 {quote} = {price:.6f} USDT\n"
@@ -159,25 +154,28 @@ def monitor_deals():
                         f"  💰 Бот заработал = {profit:.2f} USDT\n"
                         f"  ⌚️ Сделка заняла: {duration} минут\n\n"
                         f"  ⚙️ Статистика бота:\n"
-                        f"  🤖 Бот работает: {stats['days_working']} дней\n"
-                        f"  🤝 Совершил сделок: {stats['total_deals']}\n"
-                        f"  🏦 Начальный бюджет: {stats['initial']:.2f}$\n"
-                        f"  🤑 Чистая прибыль: {stats['total_profit']:.2f}$\n"
-                        f"  💳 Итого на балансе: {stats['balance']:.2f}$\n"
-                        f"  💵 % в месяц: {stats['monthly_pct']:.2f}%\n"
-                        f"  💰 % годовых: {stats['yearly_pct']:.2f}%"
+                        f"  🤖 Бот работает: {stats.get('days_working', 0)} дней\n"
+                        f"  🤝 Совершил сделок: {stats.get('total_deals', 0)}\n"
+                        f"  🏦 Начальный бюджет: {stats.get('initial', 0):.2f}$\n"
+                        f"  🤑 Чистая прибыль: {stats.get('total_profit', 0):.2f}$\n"
+                        f"  💳 Итого на балансе: {stats.get('balance', 0):.2f}$\n"
+                        f"  💵 % в месяц: {stats.get('monthly_pct', 0):.2f}%\n"
+                        f"  💰 % годовых: {stats.get('yearly_pct', 0):.2f}%"
                     )
                     send_telegram_message(msg)
 
                 known_deals[deal_id] = {"dca": dca, "status": status}
         except Exception as e:
-            log(f"[ERROR] {e}")
+            log(f"[ERROR] Exception in monitor loop: {e}")
 
         time.sleep(POLL_INTERVAL)
 
-# === Запуск ===
-if __name__ == "__main__":
-    try:
-        monitor_deals()
-    except KeyboardInterrupt:
-        log("🛑 Мониторинг остановлен пользователем.")
+@app.route("/")
+def healthcheck():
+    return jsonify({"status": "ok", "message": "Bot is running"})
+
+if name == "__main__":
+    monitor_thread = threading.Thread(target=monitor_deals, daemon=True)
+    monitor_thread.start()
+    log(f"Starting Flask server on port {PORT}")
+    app.run(host="0.0.0.0", port=PORT)
