@@ -1,3 +1,6 @@
+print("API KEY:", THREECOMMAS_API_KEY)
+print("API SECRET:", THREECOMMAS_API_SECRET)
+
 import os
 import time
 import hmac
