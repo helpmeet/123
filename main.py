@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 # === Загрузка переменных окружения ===
 load_dotenv()
 
-API_KEY = os.getenv("THREECOMMAS_API_KEY")
-API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
+API_KEY = "8970fa64d62c4c7ebd974fde5fb369618ab9f47d437e4d1ca3a66542b1388a2e"
+API_SECRET = "fc34396c98a7157db9f0e212031a4bdd311cd8da5422920a33c6afcca0af1a300c30375d71443f6e3563c039066d06454a22f572200a116833dd154cca35190da8047e3188dd5766fb8ee8eabcb18314cb4fecd56beb64b576f3dcb7ea35147a071cbfda"
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
