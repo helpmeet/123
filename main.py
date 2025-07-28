@@ -4,11 +4,8 @@ import hmac
 import hashlib
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
-# === Загрузка переменных окружения из .env ===
-load_dotenv()
-
+# === Конфигурация через переменные окружения ===
 API_KEY = os.getenv("THREECOMMAS_API_KEY")
 API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -16,7 +13,7 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
 if not all([API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID]):
-    raise ValueError("❌ Отсутствуют необходимые переменные окружения (API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID)")
+    raise ValueError("❌ Отсутствуют переменные окружения: API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID")
 
 API_BASE = "https://api.3commas.io/public/api"
 known_deals = {}
@@ -180,8 +177,8 @@ def monitor_deals():
 
         time.sleep(POLL_INTERVAL)
 
-# === Запуск ===
-if __name__ == "__main__":
+# === Точка входа ===
+if name == "__main__":
     try:
         monitor_deals()
     except KeyboardInterrupt:
