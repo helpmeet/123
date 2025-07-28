@@ -174,7 +174,7 @@ def monitor_deals():
 def healthcheck():
     return jsonify({"status": "ok", "message": "Bot is running"})
 
-if name == "__main__":
+if __name__ == "__main__":
     monitor_thread = threading.Thread(target=monitor_deals, daemon=True)
     monitor_thread.start()
     log(f"Starting Flask server on port {PORT}")
