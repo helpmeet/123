@@ -4,23 +4,36 @@ import hmac
 import hashlib
 import requests
 from datetime import datetime
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# === Конфигурация через переменные окружения ===
+# === Минимальный HTTP-сервер для Render ===
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+
+
+# === Настройки ===
 API_KEY = os.getenv("THREECOMMAS_API_KEY")
 API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
-if not all([API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID]):
-    raise ValueError("❌ Отсутствуют переменные окружения: API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID")
-
 API_BASE = "https://api.3commas.io/public/api"
 known_deals = {}
 
-# === Логирование ===
-def log(msg):
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+def log(text):
+    print(f"[LOG] {text}")
 
 # === Подпись запроса ===
 def sign(path, params):
@@ -42,18 +55,15 @@ def get(path, params=None):
 
 # === Отправка сообщения в Telegram ===
 def send_telegram_message(text):
-    try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TG_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        response = requests.post(url, data=payload)
-        if not response.ok:
-            log(f"[ERROR] Telegram: {response.text}")
-    except Exception as e:
-        log(f"[ERROR] Telegram send failed: {e}")
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    response = requests.post(url, data=payload)
+    if not response.ok:
+        log(f"[ERROR] Telegram: {response.text}")
 
 # === Получение последнего ордера сделки ===
 def get_last_order_price_and_qty(deal_id):
@@ -70,10 +80,7 @@ def get_last_order_price_and_qty(deal_id):
         log(f"[ERROR] Ошибка при получении ордеров сделки {deal_id}: {e}")
         return None, None
 
-# === Кэш статистики бота ===
-_last_stats = None
-_last_stats_time = 0
-
+# === Статистика по сделкам и аккаунту ===
 def get_bot_stats():
     deals = get("/ver1/deals", {"scope": "finished", "limit": 1000})
     accounts = get("/ver1/accounts")
@@ -91,7 +98,7 @@ def get_bot_stats():
     initial = float(usdt_account.get("initial_total") or 0)
     balance = float(usdt_account.get("available_funds") or 0)
 
-    monthly_pct = (total_profit / initial) * (30 / max(1, days_working)) * 100
+    monthly_pct = (total_profit / initial) * (30 / max(1, days_working)) * 100 if initial > 0 else 0
     yearly_pct = monthly_pct * 12
 
     return {
@@ -104,13 +111,6 @@ def get_bot_stats():
         "yearly_pct": yearly_pct
     }
 
-def get_cached_bot_stats():
-    global _last_stats, _last_stats_time
-    if time.time() - _last_stats_time > 60:
-        _last_stats = get_bot_stats()
-        _last_stats_time = time.time()
-    return _last_stats
-
 # === Основной цикл мониторинга ===
 def monitor_deals():
     log("▶️ Мониторинг сделок запущен...")
@@ -122,17 +122,16 @@ def monitor_deals():
                 pair = deal["pair"]
                 status = deal["status"]
                 dca = int(deal.get("completed_safety_orders_count") or 0)
-                base, quote = pair.split("_")
+                quote = pair.split("_")[-1]
 
                 prev = known_deals.get(deal_id, {"dca": 0, "status": ""})
-
-                # Новая сделка
+# Новая сделка
                 if deal_id not in known_deals:
                     price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
-                            f"🛒 Покупаю {base} по цене 1 {base} = {price:.6f} {quote}\n"
-                            f"📊 Объем сделки: {qty:.6f} {base}"
+                            f"🛒 Покупаю по цене 1 {quote} = {price:.6f} USDT\n"
+                            f"📊 Объем сделки: {qty:.6f} {quote}"
                         )
                         send_telegram_message(msg)
 
@@ -141,8 +140,8 @@ def monitor_deals():
                     price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
-                            f"🛒 Докупаю {base} по цене 1 {base} = {price:.6f} {quote}\n"
-                            f"📊 Объем докупки: {qty:.6f} {base}"
+                            f"🛒 Докупаю по цене 1 {quote} = {price:.6f} USDT\n"
+                            f"📊 Объем докупки: {qty:.6f} {quote}"
                         )
                         send_telegram_message(msg)
 
@@ -153,7 +152,7 @@ def monitor_deals():
                     closed = datetime.fromisoformat(deal["closed_at"].replace("Z", ""))
                     duration = int((closed - created).total_seconds() // 60)
 
-                    stats = get_cached_bot_stats()
+                    stats = get_bot_stats()
 
                     msg = (
                         "✅ Сделка завершена ✅\n"
@@ -171,13 +170,12 @@ def monitor_deals():
                     send_telegram_message(msg)
 
                 known_deals[deal_id] = {"dca": dca, "status": status}
-
         except Exception as e:
             log(f"[ERROR] {e}")
 
         time.sleep(POLL_INTERVAL)
 
-# === Точка входа ===
+# === Запуск ===
 if __name__ == "__main__":
     try:
         monitor_deals()
