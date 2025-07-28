@@ -123,7 +123,7 @@ def monitor_deals():
                 # Новая сделка
                 if deal_id not in known_deals:
                    price, qty = get_last_order_price_and_qty(deal_id)
-                    if price and qty:
+                   if price and qty:
                         msg = (
                             f"🛒 Покупаю по цене 1 {quote} = {price:.6f} USDT\n"
                             f"📊 Объем сделки: {qty:.6f} {quote}"
