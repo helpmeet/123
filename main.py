@@ -1,76 +1,84 @@
-import os
+iimport os
 import time
-import hashlib
 import hmac
+import hashlib
 import requests
 import threading
 import http.server
 import socketserver
 from datetime import datetime
 
-# === Конфигурация из переменных окружения ===
-API_KEY = os.getenv("THREECOMMAS_API_KEY")
-API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
+# === Настройки ===
+THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
+THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
-BASE_URL = "https://api.3commas.io/public/api/ver1"
+BASE_URL = "https://api.3commas.io/ver1"
 known_deals = {}
 
-# === Подпись и авторизация запроса ===
-def signed_request(method, path, params=None):
+# === Фейковый сервер для Render ===
+def fake_server():
+PORT = int(os.environ.get("PORT", 8000))
+Handler = http.server.SimpleHTTPRequestHandler
+with socketserver.TCPServer(("", PORT), Handler) as httpd:
+print("🌐 Fake HTTP server running on port", PORT)
+httpd.serve_forever()
+
+# === Внешний IP (для отладки) ===
+def log_external_ip():
+try:
+ip = requests.get("https://api.ipify.org").text
+print(f"[DEBUG] Внешний IP Render: {ip}")
+except Exception as e:
+print(f"[DEBUG] Не удалось получить внешний IP: {e}")
+
+# === Генерация подписи для авторизации ===
+def sign_request(path, params=None):
 if params is None:
 params = {}
-
-params["timestamp"] = int(time.time() * 1000)
-payload = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
+payload = f"{path}"
+if params:
+payload += "?" + '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
 signature = hmac.new(
-API_SECRET.encode(),
-msg=payload.encode(),
+bytes(THREECOMMAS_API_SECRET, 'utf-8'),
+msg=bytes(payload, 'utf-8'),
 digestmod=hashlib.sha256
 ).hexdigest()
+return signature
 
-headers = {
-"APIKEY": API_KEY,
-"Signature": signature
-}
-
-url = f"{BASE_URL}/{path}"
-if method.upper() == "GET":
-r = requests.get(url, headers=headers, params=params)
-else:
-r = requests.post(url, headers=headers, json=params)
-
-print(f"[DEBUG] Status: {r.status_code}")
-print(f"[DEBUG] Response: {r.text[:300]}")
-r.raise_for_status()
-return r.json()
-
-# === Получение сделок (авторизованный запрос) ===
+# === Получение сделок ===
 def get_deals():
-return signed_request("GET", "deals", {
-"scope": "active",
-"limit": 20
-})
+path = "/deals"
+params = {"limit": 20, "scope": "active"}
+headers = {
+"APIKEY": THREECOMMAS_API_KEY,
+"Signature": sign_request(path, params)
+}
+response = requests.get(BASE_URL + path, headers=headers, params=params)
+print(f"[DEBUG] HTTP status: {response.status_code}")
+print(f"[DEBUG] Response text: {response.text[:300]}")
+response.raise_for_status()
+return response.json()
 
-# === Telegram уведомление ===
+# === Отправка сообщения в Telegram ===
 def send_telegram_message(text):
 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-payload = {
+data = {
 "chat_id": TELEGRAM_CHAT_ID,
 "text": text,
 "parse_mode": "HTML"
 }
 try:
-resp = requests.post(url, data=payload)
-print(f"[DEBUG] Telegram status: {resp.status_code}")
+resp = requests.post(url, data=data)
+print(f"[DEBUG] Telegram send status: {resp.status_code}")
 if resp.status_code != 200:
 print(f"[DEBUG] Telegram error: {resp.text}")
 except Exception as e:
-print(f"[ERROR] Telegram exception: {e}")
+print(f"[ERROR] Ошибка при отправке в Telegram: {e}")
 
-# === Основная логика мониторинга ===
+# === Основной цикл мониторинга ===
 def monitor_deals():
 while True:
 try:
@@ -79,17 +87,19 @@ print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Получено сде
 
 for deal in deals:
 deal_id = deal["id"]
-status = deal["status"]
+print(f"[DEBUG] Обрабатывается сделка ID: {deal_id}, статус: {deal['status']}")
+
 dca_count = deal["completed_safety_orders_count"]
+status = deal["status"]
 bought_avg = float(deal.get("bought_average") or 0)
-bought_vol = float(deal.get("bought_volume") or 0)
-profit_pct = float(deal.get("actual_profit_percentage") or 0)
+bought_vol = float(deal.get("bought_volume") or 0) * 10
+profit_pct = float(deal.get("actual_profit_percentage", 0)) * 10
 
 if deal_id not in known_deals:
 msg = (
 f"📈 <b>Новая сделка</b> по паре <b>{deal['pair']}</b>\n"
 f"🟢 Статус: <code>{status}</code>\n"
-f"💵 Цена входа: {bought_avg:.4f}"
+f"💵 Цена входа: {bought_avg:.2f}"
 )
 send_telegram_message(msg)
 known_deals[deal_id] = {"dca": dca_count, "status": status}
@@ -97,39 +107,30 @@ known_deals[deal_id] = {"dca": dca_count, "status": status}
 else:
 prev = known_deals[deal_id]
 
-# Новая Safety-покупка
 if dca_count > prev["dca"]:
 msg = (
-f"➕ <b>Докупка #{dca_count}</b> в сделке <b>{deal['pair']}</b>\n"
-f"📊 Объём: {bought_vol:.2f}"
+f"➕ <b>Докупил</b> #{dca_count} в сделке <b>{deal['pair']}</b>\n"
+f"📊 Объём: {bought_vol:.2f} {deal['base_order_volume_type']}"
 )
 send_telegram_message(msg)
 known_deals[deal_id]["dca"] = dca_count
 
-# Сделка завершена
 if status == "completed" and prev["status"] != "completed":
 msg = (
-f"✅ <b>Сделка завершена</b> по паре <b>{deal['pair']}</b>\n"
+f"✅ <b>Сделка завершена</b>: <b>{deal['pair']}</b>\n"
 f"📈 Прибыль: {profit_pct:.2f}%"
 )
 send_telegram_message(msg)
 known_deals[deal_id]["status"] = status
 
 except Exception as e:
-print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка: {e}")
-
+print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ❌ Ошибка при получении сделок: {e}")
 time.sleep(POLL_INTERVAL)
 
-# === Фейковый сервер (для Render, чтобы не засыпал) ===
-def fake_server():
-PORT = int(os.environ.get("PORT", 8000))
-Handler = http.server.SimpleHTTPRequestHandler
-with socketserver.TCPServer(("", PORT), Handler) as httpd:
-print(f"🌐 Fake HTTP server running on port {PORT}")
-httpd.serve_forever()
-
-# === Старт ===
+# === Точка входа ===
 if __name__ == "__main__":
 threading.Thread(target=fake_server, daemon=True).start()
-print("📡 Старт мониторинга сделок 3Commas...")
+log_external_ip()
+print("📡 Мониторинг сделок 3Commas запущен...")
 monitor_deals()
+
