@@ -1,7 +1,4 @@
 import os
-print("THREECOMMAS_API_KEY env var:", os.getenv("THREECOMMAS_API_KEY))
-print("THREECOMMAS_API_SECRET env var:", os.getenv("THREECOMMAS_API_SECRET))
-
 import time
 import hmac
 import hashlib
