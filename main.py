@@ -4,16 +4,26 @@ import hmac
 import hashlib
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
 
-# === Настройки ===
+# === Загрузка переменных окружения ===
+load_dotenv()
+
 API_KEY = os.getenv("THREECOMMAS_API_KEY")
 API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
+if not all([API_KEY, API_SECRET, TG_TOKEN, TG_CHAT_ID]):
+    raise ValueError("❌ Отсутствуют необходимые переменные окружения.")
+
 API_BASE = "https://api.3commas.io/public/api"
 known_deals = {}
+
+# === Логирование ===
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 # === Подпись запроса ===
 def sign(path, params):
@@ -35,15 +45,18 @@ def get(path, params=None):
 
 # === Отправка сообщения в Telegram ===
 def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-    response = requests.post(url, data=payload)
-    if not response.ok:
-        print(f"[ERROR] Telegram: {response.text}")
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TG_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, data=payload)
+        if not response.ok:
+            log(f"[ERROR] Telegram: {response.text}")
+    except Exception as e:
+        log(f"[ERROR] Telegram send failed: {e}")
 
 # === Получение последнего ордера сделки ===
 def get_last_order_price_and_qty(deal_id):
@@ -57,10 +70,13 @@ def get_last_order_price_and_qty(deal_id):
         qty = float(last.get("quantity") or 0)
         return price, qty
     except Exception as e:
-        print(f"[ERROR] Ошибка при получении ордеров сделки {deal_id}: {e}")
+        log(f"[ERROR] Ошибка при получении ордеров сделки {deal_id}: {e}")
         return None, None
 
-# === Статистика по сделкам и аккаунту ===
+# === Кэш статистики бота ===
+_last_stats = None
+_last_stats_time = 0
+
 def get_bot_stats():
     deals = get("/ver1/deals", {"scope": "finished", "limit": 1000})
     accounts = get("/ver1/accounts")
@@ -91,9 +107,16 @@ def get_bot_stats():
         "yearly_pct": yearly_pct
     }
 
+def get_cached_bot_stats():
+    global _last_stats, _last_stats_time
+    if time.time() - _last_stats_time > 60:
+        _last_stats = get_bot_stats()
+        _last_stats_time = time.time()
+    return _last_stats
+
 # === Основной цикл мониторинга ===
 def monitor_deals():
-    print("[INFO] ▶️ Мониторинг сделок запущен...")
+    log("▶️ Мониторинг сделок запущен...")
     while True:
         try:
             deals = get("/ver1/deals", {"scope": "active", "limit": 100})
@@ -118,7 +141,7 @@ def monitor_deals():
 
                 # Докупка
                 elif dca > prev["dca"]:
-                     price, qty = get_last_order_price_and_qty(deal_id)
+                    price, qty = get_last_order_price_and_qty(deal_id)
                     if price and qty:
                         msg = (
                             f"🛒 Докупаю по цене 1 {quote} = {price:.6f} USDT\n"
@@ -133,7 +156,7 @@ def monitor_deals():
                     closed = datetime.fromisoformat(deal["closed_at"].replace("Z", ""))
                     duration = int((closed - created).total_seconds() // 60)
 
-                    stats = get_bot_stats()
+                    stats = get_cached_bot_stats()
 
                     msg = (
                         "✅ Сделка завершена ✅\n"
@@ -151,11 +174,15 @@ def monitor_deals():
                     send_telegram_message(msg)
 
                 known_deals[deal_id] = {"dca": dca, "status": status}
+
         except Exception as e:
-            print(f"[ERROR] {e}")
+            log(f"[ERROR] {e}")
 
         time.sleep(POLL_INTERVAL)
 
 # === Запуск ===
-if __name__ == "__main__":
-    monitor_deals()
+if name == "__main__":
+    try:
+        monitor_deals()
+    except KeyboardInterrupt:
+        log("🛑 Мониторинг остановлен пользователем.")
