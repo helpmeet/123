@@ -120,5 +120,5 @@ def monitor_deals():
         time.sleep(POLL_INTERVAL)
 
 # === Запуск ===
-if name == "__main__":
+if __name__ == "__main__":
     monitor_deals()
