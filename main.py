@@ -114,28 +114,28 @@ def monitor_deals():
             else:
                 prev = known_deals[deal_id]
 
-# Докупил DCA
-                if dca > prev["dca"]:
-                    msg = (
-                        f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
-                        f"📊 Объём: {bought_vol:.2f} {deal.get('base_order_volume_type','')}"
-                    )
-                    send_telegram_message(msg)
-                    known_deals[deal_id]["dca"] = dca
+            # Докупил DCA
+            if dca > prev["dca"]:
+                 msg = (
+                     f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
+                     f"📊 Объём: {bought_vol:.2f} {deal.get('base_order_volume_type','')}"
+                 )
+                 send_telegram_message(msg)
+                 known_deals[deal_id]["dca"] = dca
 
-                # Сделка завершена
-                if status == "completed" and prev["status"] != "completed":
-                    msg = (
-                        f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
-                        f"📈 Прибыль: {profit_pct:.2f}%"
-                    )
-                    send_telegram_message(msg)
-                    known_deals[deal_id]["status"] = status
+            # Сделка завершена
+            if status == "completed" and prev["status"] != "completed":
+                  msg = (
+                     f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
+                     f"📈 Прибыль: {profit_pct:.2f}%"
+                 )
+                 send_telegram_message(msg)
+                 known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
 
 # === Запуск приложения ===
-if __name__ == "main":
+if __name__ == "__main__":
     log_external_ip()
     threading.Thread(target=fake_server, daemon=True).start()
     monitor_deals()
