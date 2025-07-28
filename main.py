@@ -178,7 +178,7 @@ def monitor_deals():
         time.sleep(POLL_INTERVAL)
 
 # === Точка входа ===
-if name == "__main__":
+if __name__ == "__main__":
     try:
         monitor_deals()
     except KeyboardInterrupt:
