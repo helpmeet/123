@@ -30,7 +30,7 @@ def fake_server():
         print(f"[{datetime.utcnow()}] 🌐 HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
 
-# === Логирование внешнего IP для whitelist 3Commas ===
+# === Лог внешнего IP ===
 def log_external_ip():
     try:
         ip = requests.get("https://api.ipify.org").text
@@ -67,7 +67,7 @@ def get_deals():
         print(f"[{datetime.utcnow()}] ❌ Ошибка при получении сделок: {e}")
         return []
 
-# === Отправка сообщения в Telegram с логом ===
+# === Отправка сообщения в Telegram ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -83,7 +83,7 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"[{datetime.utcnow()}] ❌ Ошибка при отправке в Telegram: {e}")
 
-# === Основная логика обработки сделок ===
+# === Основная логика мониторинга сделок ===
 def monitor_deals():
     print(f"[{datetime.utcnow()}] ▶️ Старт мониторинга сделок")
     while True:
@@ -96,10 +96,11 @@ def monitor_deals():
             dca = deal.get("completed_safety_orders_count", 0)
 
             bought_avg = float(deal.get("bought_average") or 0)
-            bought_vol = float(deal.get("bought_volume") or 0) * 10
-            profit_pct = float(deal.get("actual_profit_percentage") or 0) * 10
+            bought_vol_raw = float(deal.get("bought_volume") or 0)
+            bought_vol = bought_vol_raw * 10  # умножение на 10 по твоему требованию
+            profit_pct = float(deal.get("actual_profit_percentage") or 0)
+            profit_usd = bought_vol * (profit_pct / 100)
 
-            # Лог состояния
             print(f"[DEBUG] Deal ID {deal_id}, status {status}, dca {dca}")
 
             # Новая сделка
@@ -107,34 +108,38 @@ def monitor_deals():
                 msg = (
                     f"📈 <b>Новая сделка</b> по паре <b>{pair}</b>\n"
                     f"🟢 Статус: <code>{status}</code>\n"
-                    f"💵 Цена входа: {bought_avg:.2f}"
+                    f"💵 Цена входа: {bought_avg:.4f}\n"
+                    f"📦 Объём: {bought_vol:.2f} USDT"
                 )
                 send_telegram_message(msg)
                 known_deals[deal_id] = {"status": status, "dca": dca}
             else:
                 prev = known_deals[deal_id]
 
-                # Докупил DCA
+                # Докупил
                 if dca > prev["dca"]:
                     msg = (
                         f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
-                        f"📊 Объём: {bought_vol:.2f} {deal.get('base_order_volume_type','')}"
+                        f"📊 Объём: {bought_vol:.2f} USDT"
                     )
                     send_telegram_message(msg)
                     known_deals[deal_id]["dca"] = dca
 
-                # Сделка завершена
+                # Завершена
                 if status == "completed" and prev["status"] != "completed":
                     msg = (
                         f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
-                        f"📈 Прибыль: {profit_pct:.2f}%"
+                        f"📈 Прибыль: {profit_pct:.2f}%\n"
+                        f"💰 В долларах (x10): {profit_usd:.2f} USDT\n"
+                        f"💵 Цена входа: {bought_avg:.4f}\n"
+                        f"📦 Объём: {bought_vol:.2f} USDT"
                     )
                     send_telegram_message(msg)
                     known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
 
-# === Запуск приложения ===
+# === Запуск ===
 if __name__ == "__main__":
     log_external_ip()
     threading.Thread(target=fake_server, daemon=True).start()
