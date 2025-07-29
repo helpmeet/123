@@ -115,7 +115,7 @@ def monitor_deals():
                 prev = known_deals[deal_id]
 
                 # Докупил DCA
-if dca > prev["dca"]:
+                if dca > prev["dca"]:
                     msg = (
                         f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
                         f"📊 Объём: {bought_vol:.2f} {deal.get('base_order_volume_type','')}"
