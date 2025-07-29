@@ -130,7 +130,7 @@ def monitor_deals():
                     msg = (
                         f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
                         f"📈 Прибыль: {profit_pct:.2f}%\n"
-                        f"💰 В долларах (x10): {profit_usd:.2f} USDT\n"
+                        f"💰 В долларах: {profit_usd:.2f} USDT\n"
                         f"💵 Цена входа: {bought_avg:.4f}\n"
                         f"📦 Объём: {bought_vol:.2f} USDT"
                     )
