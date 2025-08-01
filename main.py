@@ -1,128 +1,78 @@
-import os
 import time
-import hmac
-import hashlib
-import requests
-import threading
-import http.server
-import socketserver
 from datetime import datetime, timezone
+import threading
+import requests
 
-# === Константы ===
+# === Конфигурация ===
+POLL_INTERVAL = 60  # Интервал опроса, сек
 START_BUDGET = 6000.0
-API_PATH = "/public/api/ver1/deals"
-API_URL = "https://api.3commas.io" + API_PATH
 
-# === Настройки из окружения ===
-THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
-THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+API_KEY = "YOUR_3COMMAS_API_KEY"
+BOT_ID = "YOUR_BOT_ID"
 
-# Состояние сделок
+# === Глобальные переменные ===
 known_deals = {}
+accumulated_profit_usd = 0.0
 
-# === HTTP-сервер для Render ===
-def fake_server():
-    PORT = int(os.environ.get("PORT", 8000))
-    Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"[{datetime.now(timezone.utc)}] 🌐 HTTP-сервер запущен на порту {PORT}")
-        httpd.serve_forever()
 
-# === IP-лог ===
-def log_external_ip():
+# === Вспомогательные функции ===
+def parse_float(value):
     try:
-        ip = requests.get("https://api.ipify.org").text
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Внешний IP Render: {ip}")
-    except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Не удалось получить внешний IP: {e}")
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
-# === Подпись запроса ===
-def sign_request(path, params):
-    query = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
-    payload = f"{path}?{query}"
-    return hmac.new(
-        THREECOMMAS_API_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
 
-# === Получение сделок ===
-def get_deals():
-    params = {"limit": 20}
-    signature = sign_request(API_PATH, params)
-    headers = {
-        "APIKEY": THREECOMMAS_API_KEY,
-        "Signature": signature
-    }
-
-    try:
-        resp = requests.get(API_URL, headers=headers, params=params)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении сделок: {e}")
-        return []
-
-# === Получение статистики бота ===
-def get_bot_stats():
-    bots_url = "https://api.3commas.io/public/api/ver1/bots"
-    params = {"limit": 1}
-    signature = sign_request("/public/api/ver1/bots", params)
-    headers = {
-        "APIKEY": THREECOMMAS_API_KEY,
-        "Signature": signature
-    }
-
-    try:
-        resp = requests.get(bots_url, headers=headers, params=params)
-        resp.raise_for_status()
-        bots = resp.json()
-        if not bots:
-            return None
-
-        bot = bots[0]
-        start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
-        days_running = (datetime.now(timezone.utc) - start_date).days
-        completed_deals = int(bot["completed_deals_count"])
-        final_balance = float(bot["usd_amount_scaled"])
-        profit_total = START_BUDGET - (final_balance * 10)
-        roi = (profit_total / START_BUDGET) / days_running * 365 * 100
-
-        return {
-            "bot_name": "🚀 Rocket AI Bot",
-            "start_date": start_date.strftime("%Y-%m-%d"),
-            "days_running": days_running,
-            "completed_deals": completed_deals,
-            "profit_total": profit_total,
-            "roi": roi,
-            "positive_deals": completed_deals,
-            "negative_deals": 0
-        }
-    except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении статистики: {e}")
-        return None
-
-# === Telegram-сообщение ===
 def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML"
     }
     try:
-        resp = requests.post(url, data=payload)
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Telegram status: {resp.status_code}")
-        if not resp.ok:
-            print(f"[{datetime.now(timezone.utc)}] ❌ Telegram error: {resp.text}")
+        requests.post(url, json=payload)
     except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке в Telegram: {e}")
+        print(f"[Telegram] Ошибка отправки: {e}")
+
+
+def get_deals():
+    try:
+        url = "https://api.3commas.io/public/api/ver1/deals"
+        params = {"bot_id": BOT_ID, "limit": 100}
+        headers = {"APIKEY": API_KEY}
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"[Deals] Ошибка получения сделок: {e}")
+        return []
+
+
+def get_bot_stats():
+    try:
+        url = f"https://api.3commas.io/public/api/ver1/bots/{BOT_ID}/stats"
+        headers = {"APIKEY": API_KEY}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"[Stats] Ошибка получения статистики: {e}")
+        return None
+
+
+def format_duration(seconds):
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h}ч {m}м {s}с"
+
 
 # === Основной цикл мониторинга сделок ===
 def monitor_deals():
+    global accumulated_profit_usd
     print(f"[{datetime.now(timezone.utc)}] ▶️ Старт мониторинга сделок")
     while True:
         deals = get_deals()
@@ -133,15 +83,19 @@ def monitor_deals():
             pair = deal.get("pair", "")
             dca = deal.get("completed_safety_orders_count", 0)
 
-            bought_avg = float(deal.get("bought_average") or 0)
-            bought_vol_raw = float(deal.get("bought_volume") or 0)
-            bought_vol = bought_vol_raw * 10
-            profit_pct = float(deal.get("actual_profit_percentage") or 0)
-            profit_usd = bought_vol * (profit_pct / 100)
+            bought_avg = parse_float(deal.get("bought_average"))
+            bought_vol_raw = parse_float(deal.get("bought_volume"))
+            bought_vol = bought_vol_raw * 10  # Умножаем объем на 10
+            profit_pct = parse_float(deal.get("actual_profit_percentage"))
+
+            # Прибыль в долларах (умножаем на 10)
+            profit_usd = bought_vol_raw * (profit_pct / 100) * 10
+
+            duration_sec = deal.get("duration_in_seconds", 0)
 
             if deal_id not in known_deals:
                 msg = (
-                    f"📈 <b>Взлетаю!: </b> по паре <b>{pair}</b>\n"
+                    f"📈 <b>Новая сделка</b> по паре <b>{pair}</b>\n"
                     f"🟢 Статус: <code>{status}</code>\n"
                     f"💵 Цена входа: {bought_avg:.4f}\n"
                     f"📦 Объём: {bought_vol:.2f} USDT"
@@ -160,36 +114,56 @@ def monitor_deals():
                     known_deals[deal_id]["dca"] = dca
 
                 if status == "completed" and prev["status"] != "completed":
-                    msg = (
-                        f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
-                        f"📈 Прибыль: {profit_pct:.2f}%\n"
-                        f"💰 В долларах: {profit_usd:.2f} USDT\n"
-                        f"💵 Цена входа: {bought_avg:.4f}\n"
-                        f"📦 Объём: {bought_vol:.2f} USDT\n\n"
-                    )
+                    # Обновляем накопленную прибыль
+                    accumulated_profit_usd += profit_usd
 
                     stats = get_bot_stats()
                     if stats:
-                        msg += (
-                            f"<b>📊 Статистика стратегии:</b>\n"
-                            f"{stats['bot_name']}\n"
-                            f"📅 Старт: {stats['start_date']} ({stats['days_running']} дней)\n"
-                            f"🔁 Сделок: {stats['completed_deals']}\n"
-                            f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
-                            f"💼 Стартовый бюджет: ${START_BUDGET:.2f}\n"
-                            f"📊 Общая прибыль: ${stats['profit_total']:.2f}\n"
-                            f"📈 Доходность (годовых): {stats['roi']:.2f}%"
+                        start_date_raw = stats.get("start_date", None)
+                        days_running = 1
+                        roi = 0.0
+                        if start_date_raw:
+                            try:
+                                start_date = datetime.strptime(start_date_raw, "%Y-%m-%d")
+                                days_running = max((datetime.now() - start_date).days, 1)
+                                roi = (accumulated_profit_usd / START_BUDGET) / days_running * 365 * 100
+                            except Exception as e:
+                                print(f"Ошибка расчета ROI: {e}")
+
+                        positive_deals = stats.get("positive_deals", 0)
+                        negative_deals = stats.get("negative_deals", 0)
+                        completed_deals = stats.get("completed_deals", 0)
+                        profit_total = stats.get("profit_total", 0.0)
+                        bot_name = stats.get("bot_name", "н/д")
+
+                        current_balance = START_BUDGET + accumulated_profit_usd
+
+                        msg = (
+                            f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
+                            f"📈 Прибыль: {profit_pct:.2f}%\n"
+                            f"💰 В долларах: {profit_usd:.2f} USDT\n"
+                            f"💵 Цена входа: {bought_avg:.4f}\n"
+                            f"📦 Объём: {bought_vol:.2f} USDT\n"
+                            f"⏳ Длительность: {format_duration(duration_sec)}\n\n"
+                            f"📊 <b>Статистика стратегии:</b>\n"
+                            f"🤖 {bot_name}\n"
+                            f"📅 Старт: {start_date_raw} ({days_running} дней)\n"
+                            f"🔁 Сделок: {completed_deals}\n"
+                            f"📈 Плюсовых: {positive_deals}  📉 Минусовых: {negative_deals}\n"
+                            f"💼 Начальный баланс: ${START_BUDGET:.2f}\n"
+                            f"📊 Общая прибыль: ${profit_total:.2f}\n"
+                            f"💰 Текущий баланс: ${current_balance:.2f}\n"
+                            f"📈 Доходность (годовых): {roi:.2f}%"
                         )
                     else:
-                        msg += "⚠️ Не удалось получить статистику бота."
+                        msg = "⚠️ Не удалось получить статистику бота."
 
                     send_telegram_message(msg)
                     known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
 
-# === Запуск ===
+
 if __name__ == "__main__":
-    log_external_ip()
-    threading.Thread(target=fake_server, daemon=True).start()
+    # Тут можно добавить лог внешнего IP или запуск фейкового сервера
     monitor_deals()
