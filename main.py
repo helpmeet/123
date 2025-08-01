@@ -1,7 +1,8 @@
 import time
-from datetime import datetime, timezone
 import threading
+from datetime import datetime, timezone
 import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # === Конфигурация ===
 POLL_INTERVAL = 60  # Интервал опроса, сек
@@ -70,6 +71,21 @@ def format_duration(seconds):
     return f"{h}ч {m}м {s}с"
 
 
+# === Фейковый сервер для поддержания открытого порта 8080 ===
+class FakeHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Fake server is running")
+
+
+def fake_server():
+    server_address = ('', 8080)  # слушаем на всех интерфейсах порт 8080
+    httpd = HTTPServer(server_address, FakeHandler)
+    print("[FakeServer] Запущен на порту 8080")
+    httpd.serve_forever()
+
+
 # === Основной цикл мониторинга сделок ===
 def monitor_deals():
     global accumulated_profit_usd
@@ -114,7 +130,6 @@ def monitor_deals():
                     known_deals[deal_id]["dca"] = dca
 
                 if status == "completed" and prev["status"] != "completed":
-                    # Обновляем накопленную прибыль
                     accumulated_profit_usd += profit_usd
 
                     stats = get_bot_stats()
@@ -165,5 +180,8 @@ def monitor_deals():
 
 
 if __name__ == "__main__":
-    # Тут можно добавить лог внешнего IP или запуск фейкового сервера
+    # Запускаем фейковый сервер в отдельном потоке, чтобы держать порт 8080 открытым
+    threading.Thread(target=fake_server, daemon=True).start()
+
+    # Запускаем мониторинг сделок
     monitor_deals()
