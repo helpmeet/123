@@ -85,7 +85,7 @@ def get_bot_stats():
 
         bot = bots[0]
         start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
-        days_running = (datetime.now(timezone.utc) - start_date).days
+        days_running = (datetime.now(timezone.utc) - start_date).days or 1  # избегаем деление на 0
         completed_deals = int(bot["completed_deals_count"])
         final_balance = float(bot["usd_amount_scaled"])
         profit_total = START_BUDGET - (final_balance * 10)
@@ -104,6 +104,28 @@ def get_bot_stats():
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении статистики: {e}")
         return None
+
+# === Получение цены входа сделки ===
+def get_entry_price(deal):
+    price_fields = ["bought_average", "entry_price", "entry_price_usdt"]
+
+    for field in price_fields:
+        val = deal.get(field)
+        if val is not None:
+            try:
+                return float(val)
+            except:
+                pass
+
+    completed_orders = deal.get("completed_safety_orders") or []
+    if completed_orders:
+        try:
+            price = float(completed_orders[0].get("price"))
+            return price
+        except:
+            pass
+
+    return 0.0
 
 # === Telegram-сообщение ===
 def send_telegram_message(text):
@@ -133,7 +155,7 @@ def monitor_deals():
             pair = deal.get("pair", "")
             dca = deal.get("completed_safety_orders_count", 0)
 
-            bought_avg = float(deal.get("bought_average") or 0)
+            bought_avg = get_entry_price(deal)
             bought_vol_raw = float(deal.get("bought_volume") or 0)
             bought_vol = bought_vol_raw * 10
             profit_pct = float(deal.get("actual_profit_percentage") or 0)
