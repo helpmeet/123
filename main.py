@@ -61,7 +61,16 @@ def get_deals():
     try:
         resp = requests.get(API_URL, headers=headers, params=params)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # Проверяем структуру ответа - обычно это dict с ключом 'data' или список
+        # В зависимости от API, поправь если нужно
+        if isinstance(data, dict) and 'data' in data:
+            return data['data']
+        elif isinstance(data, list):
+            return data
+        else:
+            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат данных сделок: {data}")
+            return []
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении сделок: {e}")
         return []
@@ -79,20 +88,29 @@ def get_bot_stats():
     try:
         resp = requests.get(bots_url, headers=headers, params=params)
         resp.raise_for_status()
-        bots = resp.json()
+        bots_data = resp.json()
+        # Аналогично проверяем структуру
+        if isinstance(bots_data, dict) and 'data' in bots_data:
+            bots = bots_data['data']
+        elif isinstance(bots_data, list):
+            bots = bots_data
+        else:
+            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат данных ботов: {bots_data}")
+            return None
+
         if not bots:
             return None
 
         bot = bots[0]
         start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
-        days_running = (datetime.now(timezone.utc) - start_date).days or 1  # избегаем деление на 0
-        completed_deals = int(bot["completed_deals_count"])
-        final_balance = float(bot["usd_amount_scaled"])
-        profit_total = START_BUDGET - (final_balance * 10)
-        roi = (profit_total / START_BUDGET) / days_running * 365 * 100
+        days_running = (datetime.now(timezone.utc) - start_date).days
+        completed_deals = int(bot.get("completed_deals_count", 0))
+        final_balance = float(bot.get("usd_amount_scaled", 0))
+        profit_total = final_balance - START_BUDGET  # поправил формулу (прибыль = текущий баланс - старт)
+        roi = (profit_total / START_BUDGET) / days_running * 365 * 100 if days_running > 0 else 0
 
         return {
-            "bot_name": "🚀 Rocket AI Bot",
+            "bot_name": bot.get("name", "🚀 Rocket AI Bot"),
             "start_date": start_date.strftime("%Y-%m-%d"),
             "days_running": days_running,
             "completed_deals": completed_deals,
@@ -104,28 +122,6 @@ def get_bot_stats():
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении статистики: {e}")
         return None
-
-# === Получение цены входа сделки ===
-def get_entry_price(deal):
-    price_fields = ["bought_average", "entry_price", "entry_price_usdt"]
-
-    for field in price_fields:
-        val = deal.get(field)
-        if val is not None:
-            try:
-                return float(val)
-            except:
-                pass
-
-    completed_orders = deal.get("completed_safety_orders") or []
-    if completed_orders:
-        try:
-            price = float(completed_orders[0].get("price"))
-            return price
-        except:
-            pass
-
-    return 0.0
 
 # === Telegram-сообщение ===
 def send_telegram_message(text):
@@ -155,58 +151,76 @@ def monitor_deals():
             pair = deal.get("pair", "")
             dca = deal.get("completed_safety_orders_count", 0)
 
-            bought_avg = get_entry_price(deal)
+            bought_avg_raw = deal.get("bought_average")
+            bought_avg = float(bought_avg_raw) if bought_avg_raw else 0.0
+
             bought_vol_raw = float(deal.get("bought_volume") or 0)
             bought_vol = bought_vol_raw * 10
+
             profit_pct = float(deal.get("actual_profit_percentage") or 0)
             profit_usd = bought_vol * (profit_pct / 100)
 
             if deal_id not in known_deals:
+                if bought_avg == 0.0:
+                    msg = f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>"
+                    known_deals[deal_id] = {"status": status, "dca": dca, "entry_posted": False}
+                else:
+                    msg = (
+                        f"📈 <b>Новая сделка</b> по паре <b>{pair}</b>\n"
+                        f"🟢 Статус: <code>{status}</code>\n"
+                        f"💵 Цена входа: {bought_avg:.4f}\n"
+                        f"📦 Объём: {bought_vol:.2f} USDT"
+                    )
+                    known_deals[deal_id] = {"status": status, "dca": dca, "entry_posted": True}
+
+                send_telegram_message(msg)
+                continue
+
+            prev = known_deals[deal_id]
+
+            if bought_avg > 0 and not prev.get("entry_posted", False):
                 msg = (
-                    f"📈 <b>Новая сделка</b> по паре <b>{pair}</b>\n"
-                    f"🟢 Статус: <code>{status}</code>\n"
+                    f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
                     f"💵 Цена входа: {bought_avg:.4f}\n"
                     f"📦 Объём: {bought_vol:.2f} USDT"
                 )
                 send_telegram_message(msg)
-                known_deals[deal_id] = {"status": status, "dca": dca}
-            else:
-                prev = known_deals[deal_id]
+                known_deals[deal_id]["entry_posted"] = True
 
-                if dca > prev["dca"]:
-                    msg = (
-                        f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
-                        f"📊 Объём: {bought_vol:.2f} USDT"
+            if dca > prev["dca"]:
+                msg = (
+                    f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
+                    f"📊 Объём: {bought_vol:.2f} USDT"
+                )
+                send_telegram_message(msg)
+                known_deals[deal_id]["dca"] = dca
+
+            if status == "completed" and prev["status"] != "completed":
+                msg = (
+                    f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
+                    f"📈 Прибыль: {profit_pct:.2f}%\n"
+                    f"💰 В долларах: {profit_usd:.2f} USDT\n"
+                    f"💵 Цена входа: {bought_avg:.4f}\n"
+                    f"📦 Объём: {bought_vol:.2f} USDT\n\n"
+                )
+
+                stats = get_bot_stats()
+                if stats:
+                    msg += (
+                        f"<b>📊 Статистика стратегии:</b>\n"
+                        f"{stats['bot_name']}\n"
+                        f"📅 Старт: {stats['start_date']} ({stats['days_running']} дней)\n"
+                        f"🔁 Сделок: {stats['completed_deals']}\n"
+                        f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
+                        f"💼 Стартовый бюджет: ${START_BUDGET:.2f}\n"
+                        f"📊 Общая прибыль: ${stats['profit_total']:.2f}\n"
+                        f"📈 Доходность (годовых): {stats['roi']:.2f}%"
                     )
-                    send_telegram_message(msg)
-                    known_deals[deal_id]["dca"] = dca
+                else:
+                    msg += "⚠️ Не удалось получить статистику бота."
 
-                if status == "completed" and prev["status"] != "completed":
-                    msg = (
-                        f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
-                        f"📈 Прибыль: {profit_pct:.2f}%\n"
-                        f"💰 В долларах: {profit_usd:.2f} USDT\n"
-                        f"💵 Цена входа: {bought_avg:.4f}\n"
-                        f"📦 Объём: {bought_vol:.2f} USDT\n\n"
-                    )
-
-                    stats = get_bot_stats()
-                    if stats:
-                        msg += (
-                            f"<b>📊 Статистика стратегии:</b>\n"
-                            f"{stats['bot_name']}\n"
-                            f"📅 Старт: {stats['start_date']} ({stats['days_running']} дней)\n"
-                            f"🔁 Сделок: {stats['completed_deals']}\n"
-                            f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
-                            f"💼 Стартовый бюджет: ${START_BUDGET:.2f}\n"
-                            f"📊 Общая прибыль: ${stats['profit_total']:.2f}\n"
-                            f"📈 Доходность (годовых): {stats['roi']:.2f}%"
-                        )
-                    else:
-                        msg += "⚠️ Не удалось получить статистику бота."
-
-                    send_telegram_message(msg)
-                    known_deals[deal_id]["status"] = status
+                send_telegram_message(msg)
+                known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
 
