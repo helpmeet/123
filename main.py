@@ -20,7 +20,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
-# Состояние сделок
 known_deals = {}
 
 # === HTTP-сервер для Render ===
@@ -31,13 +30,13 @@ def fake_server():
         print(f"[{datetime.now(timezone.utc)}] 🌐 HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
 
-# === IP-лог ===
+# === Лог внешнего IP ===
 def log_external_ip():
     try:
         ip = requests.get("https://api.ipify.org").text
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Внешний IP Render: {ip}")
+        print(f"[{datetime.now(timezone.utc)}] 🌐 Внешний IP: {ip}")
     except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Не удалось получить внешний IP: {e}")
+        print(f"[{datetime.now(timezone.utc)}] ❌ Не удалось получить внешний IP: {e}")
 
 # === Подпись запроса ===
 def sign_request(path, params):
@@ -62,55 +61,87 @@ def get_deals():
         resp = requests.get(API_URL, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
-        # Проверяем структуру ответа - обычно это dict с ключом 'data' или список
-        # В зависимости от API, поправь если нужно
         if isinstance(data, dict) and 'data' in data:
             return data['data']
         elif isinstance(data, list):
             return data
         else:
-            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат данных сделок: {data}")
+            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат сделок: {data}")
             return []
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении сделок: {e}")
         return []
 
-# === Получение статистики бота ===
+# === Получение статистики по боту ===
 def get_bot_stats():
     bots_url = "https://api.3commas.io/public/api/ver1/bots"
-    params = {"limit": 1}
-    signature = sign_request("/public/api/ver1/bots", params)
-    headers = {
-        "APIKEY": THREECOMMAS_API_KEY,
-        "Signature": signature
-    }
+    deals_url = "https://api.3commas.io/public/api/ver1/deals"
 
     try:
-        resp = requests.get(bots_url, headers=headers, params=params)
-        resp.raise_for_status()
-        bots_data = resp.json()
-        # Аналогично проверяем структуру
+        # Получаем бота
+        params_bots = {"limit": 1}
+        signature_bots = sign_request("/public/api/ver1/bots", params_bots)
+        headers = {
+            "APIKEY": THREECOMMAS_API_KEY,
+            "Signature": signature_bots
+        }
+
+        bots_resp = requests.get(bots_url, headers=headers, params=params_bots)
+        bots_resp.raise_for_status()
+        bots_data = bots_resp.json()
+
         if isinstance(bots_data, dict) and 'data' in bots_data:
             bots = bots_data['data']
         elif isinstance(bots_data, list):
             bots = bots_data
         else:
-            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат данных ботов: {bots_data}")
             return None
 
         if not bots:
             return None
 
         bot = bots[0]
+        bot_id = bot["id"]
+        bot_name = bot.get("name", "🚀 Rocket AI Bot")
         start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
-        days_running = (datetime.now(timezone.utc) - start_date).days
-        completed_deals = int(bot.get("completed_deals_count", 0))
-        final_balance = float(bot.get("usd_amount_scaled", 0))
-        profit_total = final_balance - START_BUDGET  # поправил формулу (прибыль = текущий баланс - старт)
-        roi = (profit_total / START_BUDGET) / days_running * 365 * 100 if days_running > 0 else 0
+        days_running = max((datetime.now(timezone.utc) - start_date).days, 1)
+
+        # Получаем завершённые сделки
+        params_deals = {
+            "bot_id": bot_id,
+            "limit": 100,
+            "scope": "completed"
+        }
+        signature_deals = sign_request("/public/api/ver1/deals", params_deals)
+        headers["Signature"] = signature_deals
+
+        deals_resp = requests.get(deals_url, headers=headers, params=params_deals)
+        deals_resp.raise_for_status()
+        deals_data = deals_resp.json()
+
+        if isinstance(deals_data, dict) and 'data' in deals_data:
+            deals = deals_data['data']
+        elif isinstance(deals_data, list):
+            deals = deals_data
+        else:
+            deals = []
+
+        completed_deals = len(deals)
+        profit_total = 0.0
+
+        for deal in deals:
+            try:
+                profit_pct = float(deal.get("actual_profit_percentage", 0))
+                volume = float(deal.get("bought_volume", 0)) * 10
+                profit_usd = volume * (profit_pct / 100)
+                profit_total += profit_usd
+            except Exception as e:
+                print(f"[DEBUG] Ошибка в расчёте прибыли сделки: {e}")
+
+        roi = (profit_total / START_BUDGET) / days_running * 365 * 100 if START_BUDGET > 0 else 0
 
         return {
-            "bot_name": bot.get("name", "🚀 Rocket AI Bot"),
+            "bot_name": bot_name,
             "start_date": start_date.strftime("%Y-%m-%d"),
             "days_running": days_running,
             "completed_deals": completed_deals,
@@ -119,11 +150,12 @@ def get_bot_stats():
             "positive_deals": completed_deals,
             "negative_deals": 0
         }
+
     except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении статистики: {e}")
+        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка в get_bot_stats: {e}")
         return None
 
-# === Telegram-сообщение ===
+# === Telegram-сообщения ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -133,13 +165,12 @@ def send_telegram_message(text):
     }
     try:
         resp = requests.post(url, data=payload)
-        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Telegram status: {resp.status_code}")
         if not resp.ok:
             print(f"[{datetime.now(timezone.utc)}] ❌ Telegram error: {resp.text}")
     except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке в Telegram: {e}")
+        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке Telegram: {e}")
 
-# === Основной цикл мониторинга сделок ===
+# === Мониторинг сделок ===
 def monitor_deals():
     print(f"[{datetime.now(timezone.utc)}] ▶️ Старт мониторинга сделок")
     while True:
@@ -150,13 +181,8 @@ def monitor_deals():
             status = deal.get("status", "")
             pair = deal.get("pair", "")
             dca = deal.get("completed_safety_orders_count", 0)
-
-            bought_avg_raw = deal.get("bought_average")
-            bought_avg = float(bought_avg_raw) if bought_avg_raw else 0.0
-
-            bought_vol_raw = float(deal.get("bought_volume") or 0)
-            bought_vol = bought_vol_raw * 10
-
+            bought_avg = float(deal.get("bought_average") or 0)
+            bought_vol = float(deal.get("bought_volume") or 0) * 10
             profit_pct = float(deal.get("actual_profit_percentage") or 0)
             profit_usd = bought_vol * (profit_pct / 100)
 
@@ -172,7 +198,6 @@ def monitor_deals():
                         f"📦 Объём: {bought_vol:.2f} USDT"
                     )
                     known_deals[deal_id] = {"status": status, "dca": dca, "entry_posted": True}
-
                 send_telegram_message(msg)
                 continue
 
@@ -200,10 +225,8 @@ def monitor_deals():
                     f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
                     f"📈 Прибыль: {profit_pct:.2f}%\n"
                     f"💰 В долларах: {profit_usd:.2f} USDT\n"
-                    f"💵 Цена входа: {bought_avg:.4f}\n"
                     f"📦 Объём: {bought_vol:.2f} USDT\n\n"
                 )
-
                 stats = get_bot_stats()
                 if stats:
                     msg += (
@@ -218,7 +241,6 @@ def monitor_deals():
                     )
                 else:
                     msg += "⚠️ Не удалось получить статистику бота."
-
                 send_telegram_message(msg)
                 known_deals[deal_id]["status"] = status
 
