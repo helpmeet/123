@@ -73,7 +73,7 @@ def get_deals():
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении сделок: {e}")
         return []
 
-# === Получение статистики бота через официальный deals_stats endpoint ===
+# === Получение статистики бота ===
 def get_bot_stats():
     bots_url = "https://api.3commas.io/public/api/ver1/bots"
     try:
@@ -108,7 +108,8 @@ def get_bot_stats():
         stats_data = stats_resp.json()
 
         completed_deals = int(stats_data.get("completed", 0))
-        profit_total = float(stats_data.get("completed_deals_usd_profit", 0))
+        profit_total_raw = float(stats_data.get("completed_deals_usd_profit", 0))
+        profit_total = profit_total_raw * 10  # умножаем на 10
         roi = (profit_total / START_BUDGET) / days_running * 365 * 100 if START_BUDGET > 0 else 0
 
         return {
@@ -118,7 +119,7 @@ def get_bot_stats():
             "completed_deals": completed_deals,
             "profit_total": profit_total,
             "roi": roi,
-            "positive_deals": completed_deals,  # по условию все сделки положительные
+            "positive_deals": completed_deals,
             "negative_deals": 0
         }
 
@@ -160,37 +161,30 @@ def monitor_deals():
 
             bought_vol = float(deal.get("bought_volume") or 0)
 
-            profit_pct = float(deal.get("actual_profit_percentage") or 0)
-            profit_usd = float(deal.get("actual_usd_profit") or 0)
+            profit_pct_raw = float(deal.get("actual_profit_percentage") or 0)
+            profit_pct = profit_pct_raw * 10  # умножаем прибыль на 10 в процентах
+            profit_usd_raw = float(deal.get("actual_usd_profit") or 0)
+            profit_usd = profit_usd_raw * 10  # умножаем прибыль на 10 в USD
 
             if deal_id not in known_deals:
-                # Новая сделка
-                if bought_avg == 0.0:
-                    msg = f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>"
-                    known_deals[deal_id] = {
-                        "status": status,
-                        "dca": dca,
-                        "entry_posted": False
-                    }
-                else:
-                    msg = (
-                        f"📈 <b>Новая сделка</b> по паре <b>{pair}</b>\n"
-                        f"🟢 Статус: <code>{status}</code>\n"
-                        f"💵 Цена входа: {bought_avg:.4f}\n"
-                        f"📦 Объём: {bought_vol:.2f} USDT"
-                    )
-                    known_deals[deal_id] = {
-                        "status": status,
-                        "dca": dca,
-                        "entry_posted": True
-                    }
-                send_telegram_message(msg)
-                continue
+                # Новая сделка, сохраним состояние
+                known_deals[deal_id] = {
+                    "status": status,
+                    "dca": dca,
+                    "entry_posted": False,
+                    "order_posted": False
+                }
 
             prev = known_deals[deal_id]
 
-            # Вход появился позже
-            if bought_avg > 0 and not prev.get("entry_posted", False):
+            # Ордер выставлен (цена входа еще 0), отправляем один раз
+            if bought_avg == 0.0 and not prev["order_posted"]:
+                msg = f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>\n⏳ Выставлен начальный ордер."
+                send_telegram_message(msg)
+                known_deals[deal_id]["order_posted"] = True
+
+            # Цена входа появилась — отправляем один раз
+            if bought_avg > 0 and not prev["entry_posted"]:
                 msg = (
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
                     f"💵 Цена входа: {bought_avg:.4f}\n"
@@ -235,7 +229,6 @@ def monitor_deals():
                 send_telegram_message(msg)
                 known_deals[deal_id]["status"] = status
             else:
-                # Обновляем статус
                 known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
