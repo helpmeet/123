@@ -22,7 +22,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
 # Состояние сделок
 known_deals = {}
-bot_start_time = datetime.now(timezone.utc)  # Время старта скрипта
+bot_start_time = datetime.now(timezone.utc)  # время старта скрипта
 
 # === HTTP-сервер для Render ===
 def fake_server():
@@ -49,6 +49,14 @@ def sign_request(path, params):
         payload.encode(),
         hashlib.sha256
     ).hexdigest()
+
+# === Простой парсер ISO-дат без внешних библиотек ===
+def parse_iso_datetime(dt_str):
+    if dt_str is None:
+        return None
+    if dt_str.endswith("Z"):
+        dt_str = dt_str[:-1] + "+00:00"
+    return datetime.fromisoformat(dt_str)
 
 # === Получение сделок ===
 def get_deals():
@@ -158,7 +166,15 @@ def monitor_deals():
             bought_vol = float(deal.get("bought_volume") or 0)
             profit_usd = float(deal.get("actual_usd_profit") or 0)
 
-            # Пропускаем старые завершённые сделки при старте
+            closed_at_str = deal.get("closed_at")
+
+            # Пропускаем уведомления о сделках, завершённых ДО запуска бота
+            if status == "completed" and closed_at_str:
+                closed_at = parse_iso_datetime(closed_at_str)
+                if closed_at < bot_start_time:
+                    continue
+
+            # Для новой сделки добавляем в known_deals
             if deal_id not in known_deals:
                 known_deals[deal_id] = {
                     "status": status,
@@ -166,8 +182,6 @@ def monitor_deals():
                     "entry_posted": False,
                     "order_posted": False
                 }
-                if status == "completed" and (datetime.now(timezone.utc) - bot_start_time).seconds < 60:
-                    continue
 
             prev = known_deals[deal_id]
 
@@ -176,7 +190,7 @@ def monitor_deals():
                 send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["order_posted"] = True
 
-            # Вход в сделку
+            # Вход в сделку (даже если бот перезапустился)
             if bought_avg > 0 and not prev["entry_posted"] and status != "completed":
                 send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
@@ -193,14 +207,15 @@ def monitor_deals():
                 )
                 known_deals[deal_id]["dca"] = dca
 
-            # Сделка завершена
+            # Завершение сделки
             if status == "completed" and prev["status"] != "completed":
+                duration = ""
                 try:
-                    opened = datetime.fromisoformat(deal["created_at"].replace("Z", "+00:00"))
-                    closed = datetime.fromisoformat(deal["closed_at"].replace("Z", "+00:00"))
+                    opened = parse_iso_datetime(deal["created_at"])
+                    closed = parse_iso_datetime(deal["closed_at"])
                     delta_days = (closed - opened).days
                     duration = f"🚀🚀🚀 Cделка заняла {delta_days} days"
-                except Exception:
+                except:
                     duration = "🚀🚀🚀 Время сделки недоступно"
 
                 msg = (
