@@ -22,6 +22,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
 # Состояние сделок
 known_deals = {}
+bot_start_time = datetime.now(timezone.utc)  # время старта скрипта
 
 # === HTTP-сервер для Render ===
 def fake_server():
@@ -51,7 +52,7 @@ def sign_request(path, params):
 
 # === Получение сделок ===
 def get_deals():
-    params = {"limit": 20}
+    params = {"limit": 100}  # увеличили лимит
     signature = sign_request(API_PATH, params)
     headers = {
         "APIKEY": THREECOMMAS_API_KEY,
@@ -94,13 +95,11 @@ def get_bot_stats():
             return None
 
         bot = bots[0]
-        bot_id = bot["id"]
-        bot_name = bot.get("name", "🚀 Rocket AI Bot")
         start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
         days_running = max((datetime.now(timezone.utc) - start_date).days, 1)
 
-        deals_stats_url = f"https://api.3commas.io/public/api/ver1/bots/{bot_id}/deals_stats"
-        signature_stats = sign_request(f"/public/api/ver1/bots/{bot_id}/deals_stats", {})
+        deals_stats_url = f"https://api.3commas.io/public/api/ver1/bots/{bot['id']}/deals_stats"
+        signature_stats = sign_request(f"/public/api/ver1/bots/{bot['id']}/deals_stats", {})
         headers["Signature"] = signature_stats
 
         stats_resp = requests.get(deals_stats_url, headers=headers)
@@ -108,12 +107,11 @@ def get_bot_stats():
         stats_data = stats_resp.json()
 
         completed_deals = int(stats_data.get("completed", 0))
-        profit_total_raw = float(stats_data.get("completed_deals_usd_profit", 0))
-        profit_total = profit_total_raw * 10  # умножаем на 10
-        roi = (profit_total / START_BUDGET) / days_running * 365 * 100 if START_BUDGET > 0 else 0
+        profit_total = float(stats_data.get("completed_deals_usd_profit", 0))
+
+        roi = (profit_total / START_BUDGET) * (365 / days_running) * 100 if START_BUDGET > 0 else 0
 
         return {
-            "bot_name": bot_name,
             "start_date": start_date.strftime("%Y-%m-%d"),
             "days_running": days_running,
             "completed_deals": completed_deals,
@@ -153,73 +151,73 @@ def monitor_deals():
         for deal in deals:
             deal_id = deal.get("id")
             status = deal.get("status", "")
-            pair = deal.get("pair", "")
+            pair = deal.get("pair", "").upper()
             dca = deal.get("completed_safety_orders_count", 0)
 
-            bought_avg_raw = deal.get("bought_average")
-            bought_avg = float(bought_avg_raw) if bought_avg_raw else 0.0
-
+            bought_avg = float(deal.get("bought_average") or 0)
             bought_vol = float(deal.get("bought_volume") or 0)
+            profit_usd = float(deal.get("actual_usd_profit") or 0)
 
-            profit_pct_raw = float(deal.get("actual_profit_percentage") or 0)
-            profit_pct = profit_pct_raw * 10  # умножаем прибыль на 10 в процентах
-            profit_usd_raw = float(deal.get("actual_usd_profit") or 0)
-            profit_usd = profit_usd_raw * 10  # умножаем прибыль на 10 в USD
-
+            # Для нового запуска: не отправляем уведомления по старым завершённым сделкам
             if deal_id not in known_deals:
-                # Новая сделка, сохраним состояние
                 known_deals[deal_id] = {
                     "status": status,
                     "dca": dca,
                     "entry_posted": False,
                     "order_posted": False
                 }
+                if status == "completed" and (datetime.now(timezone.utc) - bot_start_time).seconds < 60:
+                    continue  # пропускаем старые сделки при старте
 
             prev = known_deals[deal_id]
 
-            # Ордер выставлен (цена входа еще 0), отправляем один раз
-            if bought_avg == 0.0 and not prev["order_posted"]:
-                msg = f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>\n⏳ Выставлен начальный ордер."
-                send_telegram_message(msg)
+            # Ищу точку входа
+            if bought_avg == 0 and not prev["order_posted"]:
+                send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["order_posted"] = True
 
-            # Цена входа появилась — отправляем один раз
-            if bought_avg > 0 and not prev["entry_posted"]:
-                msg = (
+            # Вход в сделку (даже если бот перезапустился)
+            if bought_avg > 0 and not prev["entry_posted"] and status != "completed":
+                send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
                     f"💵 Цена входа: {bought_avg:.4f}\n"
                     f"📦 Объём: {bought_vol:.2f} USDT"
                 )
-                send_telegram_message(msg)
                 known_deals[deal_id]["entry_posted"] = True
 
             # Докупка
             if dca > prev["dca"]:
-                msg = (
+                send_telegram_message(
                     f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
                     f"📊 Объём: {bought_vol:.2f} USDT"
                 )
-                send_telegram_message(msg)
                 known_deals[deal_id]["dca"] = dca
 
-            # Сделка завершена
+            # Завершение сделки
             if status == "completed" and prev["status"] != "completed":
+                duration = ""
+                try:
+                    opened = datetime.fromisoformat(deal["created_at"].replace("Z", "+00:00"))
+                    closed = datetime.fromisoformat(deal["closed_at"].replace("Z", "+00:00"))
+                    delta_days = (closed - opened).days
+                    duration = f"🚀🚀🚀 Cделка заняла {delta_days} days"
+                except:
+                    duration = "🚀🚀🚀 Время сделки недоступно"
+
                 msg = (
-                    f"✅ <b>Сделка завершена</b>: <b>{pair}</b>\n"
-                    f"📈 Прибыль: {profit_pct:.2f}%\n"
-                    f"💰 В долларах: {profit_usd:.2f} USDT\n"
-                    f"💵 Цена входа: {bought_avg:.4f}\n"
-                    f"📦 Объём: {bought_vol:.2f} USDT\n\n"
+                    f"✅✅✅ Сделка успешно завершена\n"
+                    f"💵💵💵 Профит +{profit_usd:.2f} USDT\n"
+                    f"{duration}\n\n"
                 )
+
                 stats = get_bot_stats()
                 if stats:
                     msg += (
-                        f"<b>📊 Статистика стратегии:</b>\n"
-                        f"{stats['bot_name']}\n"
-                        f"📅 Старт: {stats['start_date']} ({stats['days_running']} дней)\n"
-                        f"🔁 Сделок: {stats['completed_deals']}\n"
+                        f"📊 Статистика бота:\n"
+                        f"📅 Запущен {stats['days_running']} дн.\n"
+                        f"🔁 Совершил сделок: {stats['completed_deals']}\n"
                         f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
-                        f"💼 Стартовый бюджет: ${START_BUDGET:.2f}\n"
+                        f"💼 Начальный бюджет: ${START_BUDGET:.2f}\n\n"
                         f"📊 Общая прибыль: ${stats['profit_total']:.2f}\n"
                         f"📈 Доходность (годовых): {stats['roi']:.2f}%"
                     )
@@ -227,9 +225,8 @@ def monitor_deals():
                     msg += "⚠️ Не удалось получить статистику бота."
 
                 send_telegram_message(msg)
-                known_deals[deal_id]["status"] = status
-            else:
-                known_deals[deal_id]["status"] = status
+
+            known_deals[deal_id]["status"] = status
 
         time.sleep(POLL_INTERVAL)
 
