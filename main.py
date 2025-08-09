@@ -22,7 +22,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 
 # Состояние сделок
 known_deals = {}
-bot_start_time = datetime.now(timezone.utc)  # время старта скрипта
+bot_start_time = datetime.now(timezone.utc)  # Время старта скрипта
 
 # === HTTP-сервер для Render ===
 def fake_server():
@@ -52,7 +52,7 @@ def sign_request(path, params):
 
 # === Получение сделок ===
 def get_deals():
-    params = {"limit": 100}  # увеличили лимит
+    params = {"limit": 100}
     signature = sign_request(API_PATH, params)
     headers = {
         "APIKEY": THREECOMMAS_API_KEY,
@@ -158,7 +158,7 @@ def monitor_deals():
             bought_vol = float(deal.get("bought_volume") or 0)
             profit_usd = float(deal.get("actual_usd_profit") or 0)
 
-            # Для нового запуска: не отправляем уведомления по старым завершённым сделкам
+            # Пропускаем старые завершённые сделки при старте
             if deal_id not in known_deals:
                 known_deals[deal_id] = {
                     "status": status,
@@ -167,7 +167,7 @@ def monitor_deals():
                     "order_posted": False
                 }
                 if status == "completed" and (datetime.now(timezone.utc) - bot_start_time).seconds < 60:
-                    continue  # пропускаем старые сделки при старте
+                    continue
 
             prev = known_deals[deal_id]
 
@@ -176,7 +176,7 @@ def monitor_deals():
                 send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["order_posted"] = True
 
-            # Вход в сделку (даже если бот перезапустился)
+            # Вход в сделку
             if bought_avg > 0 and not prev["entry_posted"] and status != "completed":
                 send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
@@ -193,15 +193,14 @@ def monitor_deals():
                 )
                 known_deals[deal_id]["dca"] = dca
 
-            # Завершение сделки
+            # Сделка завершена
             if status == "completed" and prev["status"] != "completed":
-                duration = ""
                 try:
                     opened = datetime.fromisoformat(deal["created_at"].replace("Z", "+00:00"))
                     closed = datetime.fromisoformat(deal["closed_at"].replace("Z", "+00:00"))
                     delta_days = (closed - opened).days
                     duration = f"🚀🚀🚀 Cделка заняла {delta_days} days"
-                except:
+                except Exception:
                     duration = "🚀🚀🚀 Время сделки недоступно"
 
                 msg = (
