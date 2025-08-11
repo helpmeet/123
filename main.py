@@ -115,7 +115,7 @@ def get_bot_stats():
         stats_data = stats_resp.json()
 
         completed_deals = int(stats_data.get("completed", 0))
-        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * 10  # Умножаем на 10
+        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * 10  # умножаем на 10
 
         roi = (profit_total / START_BUDGET) * (365 / days_running) * 100 if START_BUDGET > 0 else 0
 
@@ -149,72 +149,44 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке в Telegram: {e}")
 
-# === Основной цикл мониторинга сделок ===
+# === Основной цикл мониторинга сделок с жёсткой логикой сообщений ===
 def monitor_deals():
     print(f"[{datetime.now(timezone.utc)}] ▶️ Старт мониторинга сделок")
     while True:
         deals = get_deals()
         print(f"[{datetime.now(timezone.utc)}] Получено сделок: {len(deals)}")
 
+        # Сначала обрабатываем закрытые сделки, чтобы сразу отправить сообщение о закрытии
+        closed_deals_ids = set()
         for deal in deals:
             deal_id = deal.get("id")
             status = deal.get("status", "")
-            pair = deal.get("pair", "").upper()
-            dca = deal.get("completed_safety_orders_count", 0)
-
-            bought_avg = float(deal.get("bought_average") or 0)
-            bought_vol = float(deal.get("bought_volume") or 0)
-            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10  # Умножаем на 10
-
             closed_at_str = deal.get("closed_at")
-
-            # Пропускаем уведомления о сделках, завершённых ДО запуска бота
             if status == "completed" and closed_at_str:
                 closed_at = parse_iso_datetime(closed_at_str)
-                if closed_at < bot_start_time:
-                    continue
+                if closed_at >= bot_start_time:
+                    closed_deals_ids.add(deal_id)
 
-            # Для новой сделки добавляем в known_deals
+        for deal in deals:
+            deal_id = deal.get("id")
+            if deal_id not in closed_deals_ids:
+                continue
+
+            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10  # умножаем на 10
+            pair = deal.get("pair", "").upper()
+
             if deal_id not in known_deals:
-                known_deals[deal_id] = {
-                    "status": status,
-                    "dca": dca,
-                    "entry_posted": False,
-                    "order_posted": False
-                }
+                known_deals[deal_id] = {"stage": None}
 
-            prev = known_deals[deal_id]
+            stage = known_deals[deal_id]["stage"]
 
-            # Ищу точку входа
-            if bought_avg == 0 and not prev["order_posted"]:
-                send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
-                known_deals[deal_id]["order_posted"] = True
-
-            # Вход в сделку
-            if bought_avg > 0 and not prev["entry_posted"] and status != "completed":
-                send_telegram_message(
-                    f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
-                    f"💵 Цена входа: {bought_avg:.4f}\n"
-                    f"📦 Объём: {bought_vol:.2f} USDT"
-                )
-                known_deals[deal_id]["entry_posted"] = True
-
-            # Докупка
-            if dca > prev["dca"]:
-                send_telegram_message(
-                    f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
-                    f"📊 Объём: {bought_vol:.2f} USDT"
-                )
-                known_deals[deal_id]["dca"] = dca
-
-            # Завершение сделки
-            if status == "completed" and prev["status"] != "completed":
+            if stage != "closed":
                 duration = ""
                 try:
                     opened = parse_iso_datetime(deal["created_at"])
                     closed = parse_iso_datetime(deal["closed_at"])
                     delta_days = (closed - opened).days
-                    duration = f"🚀🚀🚀 Cделка заняла {delta_days} days"
+                    duration = f"🚀🚀🚀 Сделка заняла {delta_days} days"
                 except:
                     duration = "🚀🚀🚀 Время сделки недоступно"
 
@@ -239,6 +211,55 @@ def monitor_deals():
                     msg += "⚠️ Не удалось получить статистику бота."
 
                 send_telegram_message(msg)
+                known_deals[deal_id]["stage"] = "closed"
+
+        # Затем обрабатываем открытые сделки по этапам
+        for deal in deals:
+            deal_id = deal.get("id")
+            status = deal.get("status", "")
+            pair = deal.get("pair", "").upper()
+            dca = deal.get("completed_safety_orders_count", 0)
+
+            bought_avg = float(deal.get("bought_average") or 0)
+            bought_vol = float(deal.get("bought_volume") or 0)
+            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
+
+            if status == "completed":
+                # Уже обработали выше
+                continue
+
+            if deal_id not in known_deals:
+                known_deals[deal_id] = {"stage": None, "dca": 0}
+
+            stage = known_deals[deal_id].get("stage")
+            prev_dca = known_deals[deal_id].get("dca", 0)
+
+            # Шаг 1: Ищу точку входа
+            if bought_avg == 0 and stage != "looking":
+                send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
+                known_deals[deal_id]["stage"] = "looking"
+
+            # Шаг 2: Выставлен начальный ордер (примерная проверка)
+            elif bought_avg == 0 and status in ("active", "new") and stage == "looking":
+                send_telegram_message(f"📌 <b>Выставлен начальный ордер</b> по паре <b>{pair}</b>")
+                known_deals[deal_id]["stage"] = "order_placed"
+
+            # Шаг 3: Вход в сделку (купил)
+            elif bought_avg > 0 and stage != "entered":
+                send_telegram_message(
+                    f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
+                    f"💵 Цена входа: {bought_avg:.4f}\n"
+                    f"📦 Объём: {bought_vol:.2f} USDT"
+                )
+                known_deals[deal_id]["stage"] = "entered"
+
+            # Шаг 4: Докупка (DCA увеличился)
+            if dca > prev_dca:
+                send_telegram_message(
+                    f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
+                    f"📊 Объём: {bought_vol:.2f} USDT"
+                )
+                known_deals[deal_id]["dca"] = dca
 
             known_deals[deal_id]["status"] = status
 
