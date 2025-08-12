@@ -32,6 +32,17 @@ def fake_server():
         print(f"[{datetime.now(timezone.utc)}] 🌐 HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
 
+# === Самопинг для Render ===
+def self_ping():
+    port = int(os.environ.get("PORT", 8000))
+    while True:
+        try:
+            requests.get(f"http://localhost:{port}")
+            print(f"[{datetime.now(timezone.utc)}] [DEBUG] Самопинг прошёл успешно")
+        except Exception as e:
+            print(f"[{datetime.now(timezone.utc)}] [DEBUG] Самопинг не удался: {e}")
+        time.sleep(300)  # каждые 5 минут
+
 # === IP-лог ===
 def log_external_ip():
     try:
@@ -156,7 +167,7 @@ def monitor_deals():
         deals = get_deals()
         print(f"[{datetime.now(timezone.utc)}] Получено сделок: {len(deals)}")
 
-        # Сначала обрабатываем закрытые сделки, чтобы сразу отправить сообщение о закрытии
+        # Сначала обрабатываем закрытые сделки
         closed_deals_ids = set()
         for deal in deals:
             deal_id = deal.get("id")
@@ -172,7 +183,7 @@ def monitor_deals():
             if deal_id not in closed_deals_ids:
                 continue
 
-            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10  # умножаем на 10
+            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
             pair = deal.get("pair", "").upper()
 
             if deal_id not in known_deals:
@@ -181,12 +192,14 @@ def monitor_deals():
             stage = known_deals[deal_id]["stage"]
 
             if stage != "closed":
-                duration = ""
                 try:
                     opened = parse_iso_datetime(deal["created_at"])
                     closed = parse_iso_datetime(deal["closed_at"])
-                    delta_days = (closed - opened).days
-                    duration = f"🚀🚀🚀 Сделка заняла {delta_days} days"
+                    delta = closed - opened
+                    days = delta.days
+                    hours = delta.seconds // 3600
+                    minutes = (delta.seconds % 3600) // 60
+                    duration = f"🚀🚀🚀 Сделка заняла {days} дн. {hours} ч. {minutes} мин."
                 except:
                     duration = "🚀🚀🚀 Время сделки недоступно"
 
@@ -213,7 +226,7 @@ def monitor_deals():
                 send_telegram_message(msg)
                 known_deals[deal_id]["stage"] = "closed"
 
-        # Затем обрабатываем открытые сделки по этапам
+        # Открытые сделки
         for deal in deals:
             deal_id = deal.get("id")
             status = deal.get("status", "")
@@ -222,10 +235,8 @@ def monitor_deals():
 
             bought_avg = float(deal.get("bought_average") or 0)
             bought_vol = float(deal.get("bought_volume") or 0)
-            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
 
             if status == "completed":
-                # Уже обработали выше
                 continue
 
             if deal_id not in known_deals:
@@ -234,17 +245,14 @@ def monitor_deals():
             stage = known_deals[deal_id].get("stage")
             prev_dca = known_deals[deal_id].get("dca", 0)
 
-            # Шаг 1: Ищу точку входа
             if bought_avg == 0 and stage != "looking":
                 send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["stage"] = "looking"
 
-            # Шаг 2: Выставлен начальный ордер (примерная проверка)
             elif bought_avg == 0 and status in ("active", "new") and stage == "looking":
                 send_telegram_message(f"📌 <b>Выставлен начальный ордер</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["stage"] = "order_placed"
 
-            # Шаг 3: Вход в сделку (купил)
             elif bought_avg > 0 and stage != "entered":
                 send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
@@ -253,7 +261,6 @@ def monitor_deals():
                 )
                 known_deals[deal_id]["stage"] = "entered"
 
-            # Шаг 4: Докупка (DCA увеличился)
             if dca > prev_dca:
                 send_telegram_message(
                     f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
@@ -269,4 +276,5 @@ def monitor_deals():
 if __name__ == "__main__":
     log_external_ip()
     threading.Thread(target=fake_server, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
     monitor_deals()
