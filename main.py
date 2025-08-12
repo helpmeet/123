@@ -6,7 +6,6 @@ import requests
 import threading
 import http.server
 import socketserver
-import logging
 from datetime import datetime, timezone
 
 # === Константы ===
@@ -25,54 +24,21 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
 known_deals = {}
 bot_start_time = datetime.now(timezone.utc)  # время старта скрипта
 
-# === Логирование ===
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-# === HTTP-сервер для Render с отдачей 200 на "/" ===
-class SimpleHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        # Отключаем дефолтный вывод в stdout
-        return
-
-def run_http_server():
+# === HTTP-сервер для Render ===
+def fake_server():
     PORT = int(os.environ.get("PORT", 8000))
-    with socketserver.TCPServer(("", PORT), SimpleHandler) as httpd:
-        logging.info(f"HTTP-сервер запущен на порту {PORT}")
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"[{datetime.now(timezone.utc)}] 🌐 HTTP-сервер запущен на порту {PORT}")
         httpd.serve_forever()
-
-# === Самопинг локального HTTP-сервера ===
-def self_ping():
-    port = int(os.environ.get("PORT", 8000))
-    url = f"http://localhost:{port}/"
-    while True:
-        try:
-            resp = requests.get(url)
-            logging.info(f"Самопинг {url} статус: {resp.status_code}")
-        except Exception as e:
-            logging.warning(f"Самопинг не удался: {e}")
-        time.sleep(300)  # 5 минут
 
 # === IP-лог ===
 def log_external_ip():
     try:
         ip = requests.get("https://api.ipify.org").text
-        logging.info(f"Внешний IP Render: {ip}")
+        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Внешний IP Render: {ip}")
     except Exception as e:
-        logging.warning(f"Не удалось получить внешний IP: {e}")
+        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Не удалось получить внешний IP: {e}")
 
 # === Подпись запроса ===
 def sign_request(path, params):
@@ -110,10 +76,10 @@ def get_deals():
         elif isinstance(data, list):
             return data
         else:
-            logging.error(f"Неизвестный формат данных сделок: {data}")
+            print(f"[{datetime.now(timezone.utc)}] ❌ Неизвестный формат данных сделок: {data}")
             return []
     except Exception as e:
-        logging.error(f"Ошибка при получении сделок: {e}")
+        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при получении сделок: {e}")
         return []
 
 # === Получение статистики бота ===
@@ -133,7 +99,7 @@ def get_bot_stats():
         bots = bots_data.get("data") if isinstance(bots_data, dict) else bots_data
 
         if not bots or not isinstance(bots, list):
-            logging.error("Боты не получены или формат некорректен.")
+            print("[STATS] ❌ Боты не получены или формат некорректен.")
             return None
 
         bot = bots[0]
@@ -164,7 +130,7 @@ def get_bot_stats():
         }
 
     except Exception as e:
-        logging.error(f"Ошибка при получении статистики бота: {e}")
+        print(f"[STATS] ❌ Ошибка при получении статистики бота: {e}")
         return None
 
 # === Telegram-сообщение ===
@@ -177,20 +143,20 @@ def send_telegram_message(text):
     }
     try:
         resp = requests.post(url, data=payload)
-        logging.info(f"Telegram статус: {resp.status_code}")
+        print(f"[{datetime.now(timezone.utc)}] [DEBUG] Telegram status: {resp.status_code}")
         if not resp.ok:
-            logging.error(f"Telegram error: {resp.text}")
+            print(f"[{datetime.now(timezone.utc)}] ❌ Telegram error: {resp.text}")
     except Exception as e:
-        logging.error(f"Ошибка при отправке в Telegram: {e}")
+        print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке в Telegram: {e}")
 
 # === Основной цикл мониторинга сделок с жёсткой логикой сообщений ===
 def monitor_deals():
-    logging.info("Старт мониторинга сделок")
+    print(f"[{datetime.now(timezone.utc)}] ▶️ Старт мониторинга сделок")
     while True:
         deals = get_deals()
-        logging.info(f"Получено сделок: {len(deals)}")
+        print(f"[{datetime.now(timezone.utc)}] Получено сделок: {len(deals)}")
 
-        # Обработка закрытых сделок
+        # Сначала обрабатываем закрытые сделки, чтобы сразу отправить сообщение о закрытии
         closed_deals_ids = set()
         for deal in deals:
             deal_id = deal.get("id")
@@ -206,7 +172,7 @@ def monitor_deals():
             if deal_id not in closed_deals_ids:
                 continue
 
-            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
+            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10  # умножаем на 10
             pair = deal.get("pair", "").upper()
 
             if deal_id not in known_deals:
@@ -215,14 +181,29 @@ def monitor_deals():
             stage = known_deals[deal_id]["stage"]
 
             if stage != "closed":
+                duration = ""
                 try:
                     opened = parse_iso_datetime(deal["created_at"])
                     closed = parse_iso_datetime(deal["closed_at"])
                     delta = closed - opened
+
                     days = delta.days
-                    hours = delta.seconds // 3600
-                    minutes = (delta.seconds % 3600) // 60
-                    duration = f"🚀🚀🚀 Сделка заняла {days} дн. {hours} ч. {minutes} мин."
+                    seconds = delta.seconds
+                    hours = seconds // 3600
+                    minutes = (seconds % 3600) // 60
+                    secs = seconds % 60
+
+                    parts = []
+                    if days > 0:
+                        parts.append(f"{days} дн.")
+                    if hours > 0:
+                        parts.append(f"{hours} ч.")
+                    if minutes > 0:
+                        parts.append(f"{minutes} мин.")
+                    if secs > 0 or not parts:
+                        parts.append(f"{secs} сек.")
+
+                    duration = "🚀🚀🚀 Сделка заняла " + " ".join(parts)
                 except Exception:
                     duration = "🚀🚀🚀 Время сделки недоступно"
 
@@ -249,7 +230,7 @@ def monitor_deals():
                 send_telegram_message(msg)
                 known_deals[deal_id]["stage"] = "closed"
 
-        # Обработка открытых сделок
+        # Затем обрабатываем открытые сделки по этапам
         for deal in deals:
             deal_id = deal.get("id")
             status = deal.get("status", "")
@@ -258,8 +239,10 @@ def monitor_deals():
 
             bought_avg = float(deal.get("bought_average") or 0)
             bought_vol = float(deal.get("bought_volume") or 0)
+            profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
 
             if status == "completed":
+                # Уже обработали выше
                 continue
 
             if deal_id not in known_deals:
@@ -268,14 +251,17 @@ def monitor_deals():
             stage = known_deals[deal_id].get("stage")
             prev_dca = known_deals[deal_id].get("dca", 0)
 
+            # Шаг 1: Ищу точку входа
             if bought_avg == 0 and stage != "looking":
                 send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["stage"] = "looking"
 
+            # Шаг 2: Выставлен начальный ордер (примерная проверка)
             elif bought_avg == 0 and status in ("active", "new") and stage == "looking":
                 send_telegram_message(f"📌 <b>Выставлен начальный ордер</b> по паре <b>{pair}</b>")
                 known_deals[deal_id]["stage"] = "order_placed"
 
+            # Шаг 3: Вход в сделку (купил)
             elif bought_avg > 0 and stage != "entered":
                 send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
@@ -284,6 +270,7 @@ def monitor_deals():
                 )
                 known_deals[deal_id]["stage"] = "entered"
 
+            # Шаг 4: Докупка (DCA увеличился)
             if dca > prev_dca:
                 send_telegram_message(
                     f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
@@ -297,8 +284,6 @@ def monitor_deals():
 
 # === Запуск ===
 if __name__ == "__main__":
-    logging.info("Запуск бота")
     log_external_ip()
-    threading.Thread(target=run_http_server, daemon=True).start()
-    threading.Thread(target=self_ping, daemon=True).start()
+    threading.Thread(target=fake_server, daemon=True).start()
     monitor_deals()
