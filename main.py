@@ -4,35 +4,75 @@ import hmac
 import hashlib
 import requests
 import threading
-import logging
 import http.server
 import socketserver
-from datetime import datetime, timezone, timedelta
+import logging
+from datetime import datetime, timezone
 
-# === Настройки ===
+# === Константы ===
 START_BUDGET = 6000.0
 API_PATH = "/public/api/ver1/deals"
 API_URL = "https://api.3commas.io" + API_PATH
 
+# === Настройки из окружения ===
 THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
 THREECOMMAS_API_SECRET = os.getenv("THREECOMMAS_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "15"))
-RENDER_APP_URL = os.getenv("RENDER_APP_URL")  # Например https://yourapp.onrender.com
 
-# === Логи ===
+# Состояние сделок
+known_deals = {}
+bot_start_time = datetime.now(timezone.utc)  # время старта скрипта
+
+# === Логирование ===
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# === Время старта бота ===
-bot_start_time = datetime.now(timezone.utc)
+# === HTTP-сервер для Render с отдачей 200 на "/" ===
+class SimpleHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-# === Состояние сделок ===
-known_deals = {}
+    def log_message(self, format, *args):
+        # Отключаем дефолтный вывод в stdout
+        return
+
+def run_http_server():
+    PORT = int(os.environ.get("PORT", 8000))
+    with socketserver.TCPServer(("", PORT), SimpleHandler) as httpd:
+        logging.info(f"HTTP-сервер запущен на порту {PORT}")
+        httpd.serve_forever()
+
+# === Самопинг локального HTTP-сервера ===
+def self_ping():
+    port = int(os.environ.get("PORT", 8000))
+    url = f"http://localhost:{port}/"
+    while True:
+        try:
+            resp = requests.get(url)
+            logging.info(f"Самопинг {url} статус: {resp.status_code}")
+        except Exception as e:
+            logging.warning(f"Самопинг не удался: {e}")
+        time.sleep(300)  # 5 минут
+
+# === IP-лог ===
+def log_external_ip():
+    try:
+        ip = requests.get("https://api.ipify.org").text
+        logging.info(f"Внешний IP Render: {ip}")
+    except Exception as e:
+        logging.warning(f"Не удалось получить внешний IP: {e}")
 
 # === Подпись запроса ===
 def sign_request(path, params):
@@ -44,7 +84,7 @@ def sign_request(path, params):
         hashlib.sha256
     ).hexdigest()
 
-# === Парсер ISO-дат ===
+# === Простой парсер ISO-дат без внешних библиотек ===
 def parse_iso_datetime(dt_str):
     if dt_str is None:
         return None
@@ -60,6 +100,7 @@ def get_deals():
         "APIKEY": THREECOMMAS_API_KEY,
         "Signature": signature
     }
+
     try:
         resp = requests.get(API_URL, headers=headers, params=params)
         resp.raise_for_status()
@@ -69,7 +110,7 @@ def get_deals():
         elif isinstance(data, list):
             return data
         else:
-            logging.warning(f"Неизвестный формат данных сделок: {data}")
+            logging.error(f"Неизвестный формат данных сделок: {data}")
             return []
     except Exception as e:
         logging.error(f"Ошибка при получении сделок: {e}")
@@ -77,27 +118,27 @@ def get_deals():
 
 # === Получение статистики бота ===
 def get_bot_stats():
+    bots_url = "https://api.3commas.io/public/api/ver1/bots"
     try:
-        bots_url = "https://api.3commas.io/public/api/ver1/bots"
         params = {"limit": 1}
         signature = sign_request("/public/api/ver1/bots", params)
         headers = {
             "APIKEY": THREECOMMAS_API_KEY,
             "Signature": signature
         }
+
         resp = requests.get(bots_url, headers=headers, params=params)
         resp.raise_for_status()
         bots_data = resp.json()
         bots = bots_data.get("data") if isinstance(bots_data, dict) else bots_data
+
         if not bots or not isinstance(bots, list):
-            logging.warning("Боты не получены или формат некорректен.")
+            logging.error("Боты не получены или формат некорректен.")
             return None
+
         bot = bots[0]
         start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
-        delta = datetime.now(timezone.utc) - start_date
-        days_running = max(delta.days, 1)
-        hours_running = delta.seconds // 3600
-        minutes_running = (delta.seconds % 3600) // 60
+        days_running = max((datetime.now(timezone.utc) - start_date).days, 1)
 
         deals_stats_url = f"https://api.3commas.io/public/api/ver1/bots/{bot['id']}/deals_stats"
         signature_stats = sign_request(f"/public/api/ver1/bots/{bot['id']}/deals_stats", {})
@@ -108,26 +149,25 @@ def get_bot_stats():
         stats_data = stats_resp.json()
 
         completed_deals = int(stats_data.get("completed", 0))
-        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * 10
+        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * 10  # умножаем на 10
 
         roi = (profit_total / START_BUDGET) * (365 / days_running) * 100 if START_BUDGET > 0 else 0
 
         return {
             "start_date": start_date.strftime("%Y-%m-%d"),
             "days_running": days_running,
-            "hours_running": hours_running,
-            "minutes_running": minutes_running,
             "completed_deals": completed_deals,
             "profit_total": profit_total,
             "roi": roi,
             "positive_deals": completed_deals,
             "negative_deals": 0
         }
+
     except Exception as e:
         logging.error(f"Ошибка при получении статистики бота: {e}")
         return None
 
-# === Отправка сообщения в Telegram ===
+# === Telegram-сообщение ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -139,39 +179,18 @@ def send_telegram_message(text):
         resp = requests.post(url, data=payload)
         logging.info(f"Telegram статус: {resp.status_code}")
         if not resp.ok:
-            logging.error(f"Ошибка Telegram: {resp.text}")
+            logging.error(f"Telegram error: {resp.text}")
     except Exception as e:
         logging.error(f"Ошибка при отправке в Telegram: {e}")
 
-# === HTTP-сервер для Render ===
-def run_http_server():
-    PORT = int(os.environ.get("PORT", 8000))
-    Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        logging.info(f"HTTP-сервер запущен на порту {PORT}")
-        httpd.serve_forever()
-
-# === Самопинг публичного URL Render ===
-def self_ping():
-    if not RENDER_APP_URL:
-        logging.warning("RENDER_APP_URL не задан, самопинг не будет работать")
-        return
-    while True:
-        try:
-            resp = requests.get(RENDER_APP_URL)
-            logging.info(f"Самопинг {RENDER_APP_URL} статус: {resp.status_code}")
-        except Exception as e:
-            logging.error(f"Самопинг не удался: {e}")
-        time.sleep(300)  # 5 минут
-
-# === Основной цикл мониторинга сделок ===
+# === Основной цикл мониторинга сделок с жёсткой логикой сообщений ===
 def monitor_deals():
     logging.info("Старт мониторинга сделок")
     while True:
         deals = get_deals()
         logging.info(f"Получено сделок: {len(deals)}")
 
-        # Отфильтруем закрытые сделки после старта бота
+        # Обработка закрытых сделок
         closed_deals_ids = set()
         for deal in deals:
             deal_id = deal.get("id")
@@ -179,7 +198,7 @@ def monitor_deals():
             closed_at_str = deal.get("closed_at")
             if status == "completed" and closed_at_str:
                 closed_at = parse_iso_datetime(closed_at_str)
-                if closed_at and closed_at >= bot_start_time:
+                if closed_at >= bot_start_time:
                     closed_deals_ids.add(deal_id)
 
         for deal in deals:
@@ -217,7 +236,7 @@ def monitor_deals():
                 if stats:
                     msg += (
                         f"📊 Статистика бота:\n"
-                        f"📅 Запущен {stats['days_running']} дн. {stats['hours_running']} ч. {stats['minutes_running']} мин.\n"
+                        f"📅 Запущен {stats['days_running']} дн.\n"
                         f"🔁 Совершил сделок: {stats['completed_deals']}\n"
                         f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
                         f"💼 Начальный бюджет: ${START_BUDGET:.2f}\n\n"
@@ -279,9 +298,7 @@ def monitor_deals():
 # === Запуск ===
 if __name__ == "__main__":
     logging.info("Запуск бота")
-    # Запускаем HTTP-сервер для Render (в отдельном потоке)
+    log_external_ip()
     threading.Thread(target=run_http_server, daemon=True).start()
-    # Запускаем самопинг (чтобы Render не засыпал)
     threading.Thread(target=self_ping, daemon=True).start()
-    # Запускаем мониторинг сделок в главном потоке
     monitor_deals()
