@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 START_BUDGET = 6000.0
 API_PATH = "/public/api/ver1/deals"
 API_URL = "https://api.3commas.io" + API_PATH
+LEVERAGE = 10  # множитель для объёмов
 
 # === Настройки из окружения ===
 THREECOMMAS_API_KEY = os.getenv("THREECOMMAS_API_KEY")
@@ -115,7 +116,7 @@ def get_bot_stats():
         stats_data = stats_resp.json()
 
         completed_deals = int(stats_data.get("completed", 0))
-        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * 10
+        profit_total = float(stats_data.get("completed_deals_usd_profit", 0)) * LEVERAGE
 
         roi = (profit_total / START_BUDGET) * (365 / days_running) * 100 if START_BUDGET > 0 else 0
 
@@ -155,7 +156,7 @@ def monitor_deals():
         deals = get_deals()
         print(f"[{datetime.now(timezone.utc)}] Получено сделок: {len(deals)}")
 
-        # 1. Закрытые сделки (completed)
+        # 1. Закрытые сделки
         closed_ids = set()
         for deal in deals:
             deal_id = deal.get("id")
@@ -170,7 +171,7 @@ def monitor_deals():
                 continue
 
             if known_deals.get(deal_id, {}).get("stage") != "closed":
-                profit_usd = float(deal.get("actual_usd_profit") or 0) * 10
+                profit_usd = float(deal.get("actual_usd_profit") or 0) * LEVERAGE
                 pair = (deal.get("pair") or "").upper()
                 try:
                     opened = parse_iso_datetime(deal["created_at"])
@@ -211,7 +212,7 @@ def monitor_deals():
                 send_telegram_message(msg)
                 known_deals[deal_id] = {"stage": "closed"}
 
-        # 2. Открытые сделки — две стадии + DCA
+        # 2. Открытые сделки
         for deal in deals:
             deal_id = deal.get("id")
             status = (deal.get("status") or "").lower()
@@ -233,37 +234,41 @@ def monitor_deals():
                     "dca": 0,
                     "sent_looking": False,
                     "sent_entered": False,
+                    "last_volume": 0.0
                 }
 
             st = known_deals[deal_id]
 
-            # Игнорируем сделки, начатые до старта скрипта (но обновляем DCA)
             if created_at and created_at < bot_start_time:
                 if dca > st.get("dca", 0):
                     st["dca"] = dca
                 continue
 
-            # 1) Ищу точку входа
+            # Ищу точку входа
             if not st["sent_looking"] and bought_vol == 0.0:
                 send_telegram_message(f"📊 <b>Ищу точку входа</b> по паре <b>{pair}</b>")
                 st["sent_looking"] = True
                 st["stage"] = "looking"
 
-            # 2) Вход в сделку
+            # Вход в сделку
             if not st["sent_entered"] and (bought_vol > 0.0 or status == "bought"):
+                st["last_volume"] = bought_vol  # Запоминаем стартовый объём
                 send_telegram_message(
                     f"📈 <b>Вход в сделку</b> по паре <b>{pair}</b>\n"
                     f"💵 Цена входа: {bought_avg:.4f}\n"
-                    f"📦 Объём: {bought_vol:.2f} USDT"
+                    f"📦 Объём: {bought_vol * LEVERAGE:.2f} USDT"
                 )
                 st["sent_entered"] = True
                 st["stage"] = "entered"
 
-            # 3) DCA — докупка
+            # DCA — докупка
             if dca > st.get("dca", 0):
+                prev_vol = st.get("last_volume", 0.0)
+                last_dca_amount = bought_vol - prev_vol if prev_vol else bought_vol
+                st["last_volume"] = bought_vol
                 send_telegram_message(
                     f"➕ <b>Докупил</b> #{dca} в сделке <b>{pair}</b>\n"
-                    f"📊 Объём: {bought_vol:.2f} USDT"
+                    f"📊 Объём: {last_dca_amount * LEVERAGE:.2f} USDT"
                 )
                 st["dca"] = dca
 
