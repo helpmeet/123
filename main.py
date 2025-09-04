@@ -7,7 +7,6 @@ import threading
 import http.server
 import socketserver
 from datetime import datetime, timezone
-import dateutil.parser
 
 # === Константы ===
 START_BUDGET = 6000.0
@@ -52,6 +51,14 @@ def sign_request(path, params):
         hashlib.sha256
     ).hexdigest()
 
+# === Парсер ISO дат ===
+def parse_iso_datetime(dt_str):
+    if not dt_str:
+        return None
+    if dt_str.endswith("Z"):
+        dt_str = dt_str[:-1] + "+00:00"
+    return datetime.fromisoformat(dt_str)
+
 # === Получение списка сделок ===
 def get_deals():
     params = {"limit": 100}
@@ -60,7 +67,6 @@ def get_deals():
         "APIKEY": THREECOMMAS_API_KEY,
         "Signature": signature
     }
-
     try:
         resp = requests.get(API_URL, headers=headers, params=params)
         resp.raise_for_status()
@@ -86,18 +92,16 @@ def get_bot_stats():
             "APIKEY": THREECOMMAS_API_KEY,
             "Signature": signature
         }
-
         resp = requests.get(bots_url, headers=headers, params=params)
         resp.raise_for_status()
         bots_data = resp.json()
         bots = bots_data.get("data") if isinstance(bots_data, dict) else bots_data
-
         if not bots or not isinstance(bots, list):
             print("[STATS] ❌ Боты не получены или формат некорректен.")
             return None
 
         bot = bots[0]
-        start_date = datetime.fromisoformat(bot["created_at"].replace("Z", "+00:00"))
+        start_date = parse_iso_datetime(bot["created_at"])
         days_running = max((datetime.now(timezone.utc) - start_date).days, 1)
 
         deals_stats_url = f"https://api.3commas.io/public/api/ver1/bots/{bot['id']}/deals_stats"
@@ -142,21 +146,18 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"[{datetime.now(timezone.utc)}] ❌ Ошибка при отправке в Telegram: {e}")
 
-# === Подхват открытых сделок при старте ===
+# === Подхват старых сделок при старте ===
 def catch_up_open_deals():
     deals = get_deals()
     for deal in deals:
         deal_id = deal.get("id")
         status = (deal.get("status") or "").lower()
-        created_at = deal.get("created_at")
-        if not created_at:
-            continue
-        created_at_dt = dateutil.parser.isoparse(created_at)
-
+        created_at = parse_iso_datetime(deal.get("created_at"))
         bought_vol = float(deal.get("bought_volume") or 0.0)
         dca = int(deal.get("completed_safety_orders_count") or 0)
 
-        if created_at_dt < bot_start_time and status == "bought":
+        # Подхватываем открытые сделки, чтобы не спамить старым
+        if created_at and created_at < bot_start_time and status == "bought":
             known_deals[deal_id] = {
                 "stage": "entered",
                 "sent_entered": True,
@@ -175,16 +176,12 @@ def monitor_deals():
             for deal in deals:
                 deal_id = deal.get("id")
                 status = (deal.get("status") or "").lower()
-                created_at = deal.get("created_at")
-                closed_at = deal.get("closed_at")
+                created_at = parse_iso_datetime(deal.get("created_at"))
+                closed_at = parse_iso_datetime(deal.get("closed_at"))
                 pair = (deal.get("pair") or "").upper()
                 bought_vol = float(deal.get("bought_volume") or 0.0)
                 dca = int(deal.get("completed_safety_orders_count") or 0)
 
-                created_at_dt = dateutil.parser.isoparse(created_at) if created_at else None
-                closed_at_dt = dateutil.parser.isoparse(closed_at) if closed_at else None
-
-                # Инициализация сделки
                 if deal_id not in known_deals:
                     known_deals[deal_id] = {
                         "stage": None,
@@ -196,7 +193,7 @@ def monitor_deals():
                 st = known_deals[deal_id]
 
                 # ===== Новая сделка =====
-                if status == "bought" and not st.get("sent_entered") and created_at_dt >= bot_start_time:
+                if status == "bought" and not st.get("sent_entered") and created_at and created_at >= bot_start_time:
                     st["stage"] = "entered"
                     st["sent_entered"] = True
                     st["last_volume"] = bought_vol
@@ -221,10 +218,44 @@ def monitor_deals():
                 # ===== Закрытие сделки =====
                 if status == "completed" and st.get("stage") == "entered":
                     profit_usd = float(deal.get("actual_usd_profit") or 0) * LEVERAGE
-                    send_telegram_message(
+                    duration = "⏱️ Время сделки недоступно"
+                    try:
+                        opened = parse_iso_datetime(deal.get("created_at"))
+                        closed = parse_iso_datetime(deal.get("closed_at"))
+                        delta = closed - opened
+                        parts = []
+                        if delta.days > 0:
+                            parts.append(f"{delta.days} дн.")
+                        h, m, s = delta.seconds // 3600, (delta.seconds % 3600) // 60, delta.seconds % 60
+                        if h:
+                            parts.append(f"{h} ч.")
+                        if m:
+                            parts.append(f"{m} мин.")
+                        if s or not parts:
+                            parts.append(f"{s} сек.")
+                        duration = "🚀 Сделка длилась " + " ".join(parts)
+                    except:
+                        pass
+
+                    msg = (
                         f"✅✅✅ Сделка по паре <b>{pair}</b> закрыта\n"
-                        f"💵💵💵 Профит +{profit_usd:.2f} USDT"
+                        f"💵 Профит +{profit_usd:.2f} USDT\n"
+                        f"{duration}\n"
                     )
+                    stats = get_bot_stats()
+                    if stats:
+                        msg += (
+                            f"📊 Статистика бота:\n"
+                            f"📅 Дней работы: {stats['days_running']}\n"
+                            f"🔁 Сделок: {stats['completed_deals']}\n"
+                            f"📈 Плюсовых: {stats['positive_deals']}  📉 Минусовых: {stats['negative_deals']}\n"
+                            f"💼 Начальный бюджет: ${START_BUDGET:.2f}\n"
+                            f"📊 Общая прибыль: ${stats['profit_total']:.2f}\n"
+                            f"📈 ROI (годовых): {stats['roi']:.2f}%"
+                        )
+                    else:
+                        msg += "⚠️ Не удалось получить статистику бота."
+                    send_telegram_message(msg)
                     st["stage"] = "closed"
 
                 known_deals[deal_id] = st
